@@ -6,6 +6,14 @@ A Rust arbitrage bot for [Polymarket](https://polymarket.com) crypto “Up or Do
 
 ---
 
+## Trial Use
+### Currently only supports Linux, preferably Ubuntu 24
+1. Download the trial package from the release: poly_1h_bot.zip
+2. Place it on a cloud server, ensuring your region is allowed to trade by PolyMarket.
+3. Configure the first few blank parameters in the .env file. These parameters are exported from the PolyMarket website.
+4. Run in the foreground: `./poly_1h_bot`
+5. Run in the background: `nohup ./poly_1h_bot > /dev/null 2>&1 &`
+
 ## Features
 
 - **Market discovery**: Fetches “Up/Down” 5-minute markets (e.g. `btc-updown-5m-1770972300`) from Gamma API by symbol and 5-min UTC window.
