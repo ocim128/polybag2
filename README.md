@@ -1,10 +1,16 @@
-# poly_15min_bot
+# poly_5min_bot
 
 **English** | [中文](README.zh-CN.md)
 
 A Rust arbitrage bot for [Polymarket](https://polymarket.com) crypto “Up or Down” 5‑minute markets (UTC). It monitors order books, detects YES+NO spread arbitrage opportunities, executes trades via the CLOB API, and can periodically merge redeemable positions.
 
 ---
+
+### For the complete code, please contact TG：[@polyboy123](https://t.me/polyboy123)
+
+Below are the actual trading results; I earned over 30 USDC in less than a day.
+<img width="1306" height="838" alt="image" src="https://github.com/user-attachments/assets/d7b33c69-fac7-4b58-a302-9fabd884a563" />
+
 
 ## Trial Use
 ### Currently only supports Linux, preferably Ubuntu 24
