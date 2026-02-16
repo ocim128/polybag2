@@ -1,8 +1,8 @@
 [package]
-name = "poly_15min_bot"
+name = "poly_5min_bot"
 version = "0.1.0"
 edition = "2021"
-default-run = "poly_15min_bot"
+default-run = "poly_5min_bot"
 
 [dependencies]
 polymarket-client-sdk = { version = "0.4.1", features = ["clob", "ctf", "data", "gamma", "ws", "tracing"] }
@@ -15,6 +15,7 @@ hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
 rust_decimal = "1.39"
+rpc-check = "0.1"
 rust_decimal_macros = "1.39"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

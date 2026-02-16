@@ -6,19 +6,22 @@ A Rust arbitrage bot for [Polymarket](https://polymarket.com) crypto “Up or Do
 
 ---
 
-### For the complete code, please contact TG：[@polyboy123](https://t.me/polyboy123)
+## Quick Start
 
-Below are the actual trading results; I earned over 30 USDC in less than a day.
-<img width="1306" height="838" alt="image" src="https://github.com/user-attachments/assets/d7b33c69-fac7-4b58-a302-9fabd884a563" />
+```bash
+# 1. Install Rust (if needed), clone project, enter directory
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+git clone https://github.com/rvenandowsley/Polymarket-crypto-5min-arbitrage-bot.git && cd Polymarket-crypto-5min-arbitrage-bot
 
+# 2. Place license.key in project root, copy and edit .env
+cp .env.example .env
+# Edit .env: set POLYMARKET_PRIVATE_KEY (required)
 
-## Trial Use
-### Currently only supports Linux, preferably Ubuntu 24
-1. Download the trial package from the release: poly_1h_bot.zip
-2. Place it on a cloud server, ensuring your region is allowed to trade by PolyMarket.
-3. Configure the first few blank parameters in the .env file. These parameters are exported from the PolyMarket website.
-4. Run in the foreground: `./poly_1h_bot`
-5. Run in the background: `nohup ./poly_1h_bot > /dev/null 2>&1 &`
+# 3. Build and run
+cargo build --release && cargo run --release
+```
+
+---
 
 ## Features
 
@@ -33,21 +36,67 @@ Below are the actual trading results; I earned over 30 USDC in less than a day.
 ## Requirements
 
 - **Rust** 1.70+ (2021 edition)
-- **Environment**: `.env` in project root (see [Configuration](#configuration)).
+- **License**: Valid `license.key` in project root (obtained from the author)
+- **Environment**: `.env` in project root (see [Configuration](#configuration))
+
+---
+
+## Installation
+
+### 1. Install Rust
+
+If Rust is not installed:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+rustc --version   # Verify: 1.70 or higher
+```
+
+### 2. Get the project
+
+```bash
+git clone https://github.com/rvenandowsley/Polymarket-crypto-5min-arbitrage-bot.git
+cd Polymarket-crypto-5min-arbitrage-bot
+```
+
+Or download and extract the project archive.
+
+### 3. License setup
+
+Place the `license.key` file in the project root. The program will not run without a valid license.
+
+Optional: set `POLY_15MIN_BOT_LICENSE=/path/to/license.key` to use a custom path.
+
+### 4. Configure environment
+
+```bash
+cp .env.example .env
+# Edit .env and fill in required variables (see Configuration below)
+```
+
+### 5. Build
+
+```bash
+cargo build --release
+```
 
 ---
 
 ## Configuration
 
-Create a `.env` file (see `.env.example` if available). Required and optional variables:
+Create a `.env` file (copy from `.env.example`). Required and optional variables:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `POLYMARKET_PRIVATE_KEY` | Yes | 64‑char hex private key (no `0x`). EOA or key for Proxy. |
+| `POLYMARKET_PRIVATE_KEY` | Yes | 64‑char hex private key (no `0x`). Get from [reveal.magic.link/polymarket](https://reveal.magic.link/polymarket). |
 | `POLYMARKET_PROXY_ADDRESS` | No* | Proxy wallet address (Email/Magic or Browser Wallet). Required for merge task. |
+| `POLY_BUILDER_API_KEY` | No* | Builder API key (from Polymarket settings). Required for merge. |
+| `POLY_BUILDER_SECRET` | No* | Builder API secret. Required for merge. |
+| `POLY_BUILDER_PASSPHRASE` | No* | Builder API passphrase. Required for merge. |
 | `MIN_PROFIT_THRESHOLD` | No | Min profit ratio for arb detection (default `0.001`). |
 | `MAX_ORDER_SIZE_USDC` | No | Max order size in USDC (default `100.0`). |
-| `CRYPTO_SYMBOLS` | No | Comma‑separated symbols, e.g. `btc,eth,xrp,sol` (default `btc,eth,xrp,sol`). |
+| `CRYPTO_SYMBOLS` | No | Comma‑separated symbols, e.g. `bitcoin,ethereum,solana,xrp` (default `bitcoin,ethereum,solana,xrp`). |
 | `MARKET_REFRESH_ADVANCE_SECS` | No | Seconds before next window to refresh markets (default `5`). |
 | `RISK_MAX_EXPOSURE_USDC` | No | Max exposure cap in USDC (default `1000.0`). |
 | `RISK_IMBALANCE_THRESHOLD` | No | Imbalance threshold for risk (default `0.1`). |
@@ -60,17 +109,36 @@ Create a `.env` file (see `.env.example` if available). Required and optional va
 | `STOP_ARBITRAGE_BEFORE_END_MINUTES` | No | Stop arb N minutes before market end; `0` = disabled (default `0`). |
 | `MERGE_INTERVAL_MINUTES` | No | Merge interval in minutes; `0` = disabled (default `0`). |
 | `MIN_YES_PRICE_THRESHOLD` | No | Only arb when YES price ≥ this; `0` = no filter (default `0`). |
+| `MIN_NO_PRICE_THRESHOLD` | No | Only arb when NO price ≥ this; `0` = no filter (default `0`). |
+| `POLY_15MIN_BOT_LICENSE` | No | Custom license file path; default is `./license.key`. |
 
 ---
 
 ## Build & Run
 
+After completing [Installation](#installation):
+
 ```bash
+# Build release binary
 cargo build --release
+
+# Run the bot
 cargo run --release
 ```
 
-Logging can be controlled via `RUST_LOG` (e.g. `RUST_LOG=info` or `RUST_LOG=debug`).
+Or run the built binary directly:
+
+```bash
+./target/release/poly_15min_bot
+```
+
+**Logging**: Set `RUST_LOG` in `.env` or before running (e.g. `RUST_LOG=info` or `RUST_LOG=debug`).
+
+**Run in background** (Linux/macOS):
+
+```bash
+nohup ./target/release/poly_15min_bot > bot.log 2>&1 &
+```
 
 ---
 

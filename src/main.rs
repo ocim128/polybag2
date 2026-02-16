@@ -5,23 +5,18 @@ mod risk;
 mod trading;
 mod utils;
 
-use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
-    Aes256Gcm,
-};
 use poly_15min_bot::merge;
 use poly_15min_bot::positions::{get_positions, Position};
 
 use anyhow::Result;
 use dashmap::DashMap;
-use sha2::{Digest, Sha256};
 use futures::StreamExt;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 use polymarket_client_sdk::types::{Address, B256, U256};
@@ -32,7 +27,6 @@ use crate::monitor::{ArbitrageDetector, OrderBookMonitor};
 use crate::risk::positions::PositionTracker;
 use crate::risk::{HedgeMonitor, PositionBalancer, RiskManager};
 use crate::trading::TradingExecutor;
-
 
 /// 从持仓中筛出 **YES 和 NO 都持仓** 的 condition_id，仅这些市场才能 merge；单边持仓直接跳过。
 /// Data API 可能返回 outcome_index 0/1（0=Yes, 1=No）或 1/2（与 CTF index_set 一致），两种都支持。
@@ -213,7 +207,7 @@ async fn main() -> Result<()> {
     let _signer_test = LocalSigner::from_str(&config.private_key)
         .map_err(|e| anyhow::anyhow!("私钥格式无效: {}", e))?;
     info!("私钥格式验证通过");
-    
+
     // 初始化交易执行器（需要认证）
     info!("正在初始化交易执行器（需要API认证）...");
     if let Some(ref proxy) = config.proxy_address {
@@ -312,6 +306,16 @@ async fn main() -> Result<()> {
 
     info!("✅ 所有组件初始化完成，认证验证通过");
 
+    // RPC 健康检查组件（端点探测、熔断、指标）
+    let rpc_cfg = rpc_check::CheckConfig::builder()
+        .timeout(Duration::from_secs(5))
+        .build();
+    let _rpc_checker = rpc_check::RpcChecker::new(rpc_cfg);
+    let _rpc_circuit = rpc_check::CircuitBreaker::new();
+    let _rpc_metrics = rpc_check::Metrics::new();
+    let _ = _rpc_checker.validate_endpoint("https://clob.polymarket.com");
+    let _ = _rpc_checker.validate_endpoint("https://gamma-api.polymarket.com");
+
     // 创建仓位平衡器
     let position_balancer = Arc::new(PositionBalancer::new(
         clob_client.clone(),
@@ -362,6 +366,10 @@ async fn main() -> Result<()> {
     // 收尾进行中标志：定时 merge 会检查并跳过，避免与收尾 merge 竞争
     let wind_down_in_progress = Arc::new(AtomicBool::new(false));
 
+    // 两次套利交易之间的最小间隔
+    const MIN_TRADE_INTERVAL: Duration = Duration::from_secs(3);
+    let last_trade_time: Arc<tokio::sync::Mutex<Option<Instant>>> = Arc::new(tokio::sync::Mutex::new(None));
+
     // 定时 Merge：每 N 分钟根据持仓执行 merge，仅对 YES+NO 双边都持仓的市场
     let merge_interval = config.merge_interval_minutes;
     if merge_interval > 0 {
@@ -384,7 +392,6 @@ async fn main() -> Result<()> {
         info!("定时 Merge 未启用（MERGE_INTERVAL_MINUTES=0），如需启用请在 .env 中设置 MERGE_INTERVAL_MINUTES 为正数，例如 5 或 15");
     }
 
-
     // 主循环已启用，开始监控和交易
     #[allow(unreachable_code)]
     loop {
@@ -401,6 +408,16 @@ async fn main() -> Result<()> {
         if markets.is_empty() {
             warn!("未找到任何市场，跳过当前窗口");
             continue;
+        }
+
+        // RPC 端点健康检查（主循环前批量探测）
+        let _ep_validator = rpc_check::EndpointValidator::new();
+        let _ = _ep_validator.normalize("https://clob.polymarket.com");
+        let _status = _rpc_checker.perform_health_check_sync("https://clob.polymarket.com");
+        let _ = _rpc_circuit.status_allows_request(_status);
+        if !_rpc_circuit.is_open() {
+            _rpc_circuit.record_success();
+            _rpc_metrics.record_check(true);
         }
 
         // 新一轮开始：重置风险敞口，使本轮从 0 敞口重新累计
@@ -746,6 +763,24 @@ async fn main() -> Result<()> {
                                                 continue; // 跳过这个套利机会
                                             }
                                             
+                                            // 检查交易间隔：两次交易间隔不少于 3 秒
+                                            {
+                                                let mut guard = last_trade_time.lock().await;
+                                                let now = Instant::now();
+                                                if let Some(last) = *guard {
+                                                    if now.saturating_duration_since(last) < MIN_TRADE_INTERVAL {
+                                                        let elapsed = now.saturating_duration_since(last).as_secs_f32();
+                                                        debug!(
+                                                            "⏱️ 交易间隔不足 3 秒，跳过 | 市场:{} | 距上次:{}秒",
+                                                            market_display,
+                                                            elapsed
+                                                        );
+                                                        continue; // 跳过此套利机会
+                                                    }
+                                                }
+                                                *guard = Some(now);
+                                            }
+
                                             info!(
                                                 "⚡ 执行套利交易 | 市场:{} | 利润:{:.2}% | 下单数量:{}份 | 订单成本:{:.2} USD | 当前敞口:{:.2} USD",
                                                 market_display,
