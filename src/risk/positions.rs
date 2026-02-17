@@ -4,20 +4,25 @@ use polymarket_client_sdk::types::{Decimal, U256};
 use rust_decimal_macros::dec;
 use tracing::{debug, info, trace};
 
-use poly_5min_bot::positions::{get_positions, Position};
+use poly_5min_bot::positions::{get_positions, get_positions_for, Position};
+use polymarket_client_sdk::types::Address;
 
 pub struct PositionTracker {
     positions: DashMap<U256, Decimal>, // token_id -> Amount (positive = long position, negative = short position)
     exposure_costs: DashMap<U256, Decimal>, // token_id -> Cost (USD), used for tracking risk exposure
     max_exposure: Decimal,
+    /// Per-slot proxy address for API calls. When set, sync_from_api uses
+    /// this instead of the global POLYMARKET_PROXY_ADDRESS env var.
+    proxy_address: Option<Address>,
 }
 
 impl PositionTracker {
-    pub fn new(max_exposure: Decimal) -> Self {
+    pub fn new(max_exposure: Decimal, proxy_address: Option<Address>) -> Self {
         Self {
             positions: DashMap::new(),
             exposure_costs: DashMap::new(),
             max_exposure,
+            proxy_address,
         }
     }
 
@@ -196,7 +201,11 @@ impl PositionTracker {
         use std::collections::HashMap;
         use polymarket_client_sdk::types::B256;
         
-        let positions = get_positions().await?;
+        // Use per-slot proxy if available, otherwise fall back to global env var
+        let positions = match self.proxy_address {
+            Some(addr) => get_positions_for(addr).await?,
+            None => get_positions().await?,
+        };
         
         // Clear existing positions (exposure only increases during arbitrage execution, decreases during Merge, not backfilled from API)
         self.positions.clear();

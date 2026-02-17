@@ -126,6 +126,32 @@ impl TradingExecutor {
             .map_err(|e| anyhow::anyhow!("GTC sell order submission failed: {}", e))
     }
 
+    /// Place a GTC buy order at the specified price (used for market making quotes).
+    pub async fn buy_at_price(
+        &self,
+        token_id: U256,
+        price: Decimal,
+        size: Decimal,
+    ) -> Result<polymarket_client_sdk::clob::types::response::PostOrderResponse> {
+        let signer = LocalSigner::from_str(&self.private_key)?
+            .with_chain_id(Some(POLYGON));
+        let order = self
+            .client
+            .limit_order()
+            .token_id(token_id)
+            .side(Side::Buy)
+            .price(price)
+            .size(size)
+            .order_type(OrderType::GTC)
+            .build()
+            .await?;
+        let signed = self.client.sign(&signer, order).await?;
+        self.client
+            .post_order(signed)
+            .await
+            .map_err(|e| anyhow::anyhow!("GTC buy order submission failed: {}", e))
+    }
+
     /// Get slippage by direction: down(↓) uses second, up(↑) and flat(−/empty) use first
     fn slippage_for_direction(&self, dir: &str) -> Decimal {
         if dir == "↓" {

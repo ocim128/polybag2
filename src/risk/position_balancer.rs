@@ -4,19 +4,22 @@ use anyhow::Result;
 use polymarket_client_sdk::clob::Client;
 use polymarket_client_sdk::clob::types::request::OrdersRequest;
 use polymarket_client_sdk::clob::types::Side;
-use polymarket_client_sdk::types::{B256, Decimal, U256};
+use polymarket_client_sdk::types::{Address, B256, Decimal, U256};
 use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use tracing::{debug, error, info, warn};
 
 use super::positions::PositionTracker;
 use crate::config::Config as BotConfig;
-use poly_5min_bot::positions::get_positions;
+use poly_5min_bot::positions::{get_positions, get_positions_for};
 
 /// Position balancer
 pub struct PositionBalancer {
     clob_client: Client<polymarket_client_sdk::auth::state::Authenticated<polymarket_client_sdk::auth::Normal>>,
     position_tracker: std::sync::Arc<PositionTracker>,
+    /// Per-slot proxy address for fetching positions. When set, uses
+    /// get_positions_for(proxy) instead of the global env var.
+    proxy_address: Option<Address>,
     threshold: Decimal,
     min_total: Decimal,
     max_order_size: Decimal,
@@ -31,6 +34,7 @@ impl PositionBalancer {
         Self {
             clob_client,
             position_tracker,
+            proxy_address: config.proxy_address,
             threshold: Decimal::try_from(config.position_balance_threshold).unwrap_or(dec!(2.0)),
             min_total: Decimal::try_from(config.position_balance_min_total).unwrap_or(dec!(5.0)),
             max_order_size: Decimal::try_from(config.max_order_size_usdc).unwrap_or(dec!(5.0)),
@@ -64,8 +68,11 @@ impl PositionBalancer {
             return Ok(());
         }
 
-        // Get positions (from PositionTracker, updated via scheduled sync)
-        let positions = get_positions().await?;
+        // Get positions using per-slot proxy if available, else global env var
+        let positions = match self.proxy_address {
+            Some(proxy) => get_positions_for(proxy).await?,
+            None => get_positions().await?,
+        };
 
         // Group orders and positions by market
         let mut market_data: HashMap<B256, MarketBalanceData> = HashMap::new();

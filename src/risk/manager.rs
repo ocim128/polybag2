@@ -54,6 +54,7 @@ impl RiskManager {
             pending_pairs: DashMap::new(),
             position_tracker: std::sync::Arc::new(PositionTracker::new(
                 Decimal::try_from(config.risk_max_exposure_usdc).unwrap_or(dec!(1000.0)),
+                config.proxy_address,
             )),
             recovery_strategy: RecoveryStrategy::new(
                 config.risk_imbalance_threshold,

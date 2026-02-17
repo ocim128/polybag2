@@ -1,12 +1,14 @@
 mod config;
+mod launcher;
 mod market;
 mod monitor;
 mod risk;
+mod strategy;
 mod trading;
 mod utils;
 
 use poly_5min_bot::merge;
-use poly_5min_bot::positions::{get_positions, Position};
+use poly_5min_bot::positions::{get_positions, get_positions_for, Position};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -23,9 +25,11 @@ use polymarket_client_sdk::types::{Address, B256, U256};
 
 use crate::config::Config;
 use crate::market::{MarketDiscoverer, MarketInfo, MarketScheduler};
-use crate::monitor::{ArbitrageDetector, OrderBookMonitor};
+use crate::monitor::OrderBookMonitor;
 use crate::risk::positions::PositionTracker;
 use crate::risk::{HedgeMonitor, PositionBalancer, RiskManager};
+use crate::strategy::{StrategyContext, StrategyRunner, TradingMode};
+use crate::strategy::action_executor::ActionExecutor;
 use crate::trading::TradingExecutor;
 
 /// Filter condition_ids where both YES and NO positions are held; only these markets can be merged; skip single-sided positions.
@@ -110,7 +114,7 @@ async fn run_merge_task(
             sleep(interval).await;
             continue;
         }
-        let (condition_ids, merge_info) = match get_positions().await {
+        let (condition_ids, merge_info) = match get_positions_for(proxy).await {
             Ok(positions) => (
                 condition_ids_with_both_sides(&positions),
                 merge_info_with_both_sides(&positions),
@@ -183,17 +187,43 @@ async fn run_merge_task(
 async fn main() -> Result<()> {
     // Initialize logger
     utils::logger::init_logger()?;
-
     tracing::info!("Polymarket 5-minute arbitrage bot starting");
 
     // Load configuration
     let config = Config::from_env()?;
     tracing::info!("Configuration loaded");
+    info!("Trading mode: {} | Dry run: {}", config.trading_mode, config.dry_run);
 
-    // Initialize components (not used temporarily, main loop disabled)
+    // Check for multi-wallet mode
+    let wallets = launcher::load_wallets();
+    if !wallets.is_empty() {
+        // Multi-wallet interactive mode
+        info!("Multi-wallet mode: {} wallets detected", wallets.len());
+        let slots = launcher::interactive_pick(&wallets)?;
+        launcher::run_slots(config, slots).await?;
+    } else {
+        // Single-mode (backward compatible)
+        info!("Single-mode: using POLYMARKET_PRIVATE_KEY from .env");
+        run_trading_loop(config, "main").await?;
+    }
+
+    Ok(())
+}
+
+/// Core trading loop — runs one strategy with one wallet.
+/// Extracted from the original main() so the launcher can spawn multiple instances.
+pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
+    // Validate private key is present (may be empty in multi-wallet mode if not assigned)
+    if config.private_key.trim().is_empty() {
+        return Err(anyhow::anyhow!(
+            "[{}] No private key configured. Set POLYMARKET_PRIVATE_KEY or use multi-wallet mode (WALLET_N_KEY).",
+            slot_name
+        ));
+    }
+
+    // Initialize components
     let _discoverer = MarketDiscoverer::new(config.crypto_symbols.clone());
     let _scheduler = MarketScheduler::new(_discoverer, config.market_refresh_advance_secs);
-    let _detector = ArbitrageDetector::new(config.min_profit_threshold);
     
     // Validate private key format
     info!("Validating private key format...");
@@ -301,7 +331,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("✅ All components initialized, authentication verified");
+    info!("[{}] ✅ All components initialized, authentication verified", slot_name);
 
     // RPC health check components (endpoint probing, circuit breaker, metrics)
     let rpc_cfg = rpc_check::CheckConfig::builder()
@@ -363,9 +393,13 @@ async fn main() -> Result<()> {
     // Wind down in progress flag: scheduled merge will check and skip to avoid competing with wind down merge
     let wind_down_in_progress = Arc::new(AtomicBool::new(false));
 
-    // Minimum interval between two arbitrage trades
-    const MIN_TRADE_INTERVAL: Duration = Duration::from_secs(3);
-    let last_trade_time: Arc<tokio::sync::Mutex<Option<Instant>>> = Arc::new(tokio::sync::Mutex::new(None));
+    // Create action executor (DRY_RUN support)
+    let action_executor = ActionExecutor::new(
+        executor.clone(),
+        _risk_manager.clone(),
+        _risk_manager.position_tracker(),
+        config.dry_run,
+    );
 
     // Scheduled Merge: execute merge every N minutes based on positions, only for markets with both YES+NO positions
     let merge_interval = config.merge_interval_minutes;
@@ -419,6 +453,33 @@ async fn main() -> Result<()> {
 
         // New cycle start: reset risk exposure to accumulate from 0 this cycle
         _risk_manager.position_tracker().reset_exposure();
+
+        // Create strategy for this window
+        let mut strategy_runner = match config.trading_mode {
+            TradingMode::Arb => StrategyRunner::Arb(
+                strategy::arb::ArbitrageStrategy::new(config.min_profit_threshold),
+            ),
+            TradingMode::MarketMaker => {
+                use rust_decimal::Decimal;
+                let mm_cfg = strategy::mm::MmConfig {
+                    base_spread: Decimal::try_from(config.mm_base_spread).unwrap_or(rust_decimal_macros::dec!(0.03)),
+                    inventory_gamma: Decimal::try_from(config.mm_inventory_gamma).unwrap_or(rust_decimal_macros::dec!(0.03)),
+                    max_position_per_side: Decimal::try_from(config.mm_max_position_per_side).unwrap_or(rust_decimal_macros::dec!(5)),
+                    quote_size: Decimal::try_from(config.mm_quote_size).unwrap_or(rust_decimal_macros::dec!(1)),
+                    min_seconds_to_quote: config.mm_min_seconds_to_quote,
+                };
+                info!("🏪 Market Maker config: {:?}", mm_cfg);
+                StrategyRunner::MarketMaker(strategy::mm::MarketMakerStrategy::new(mm_cfg))
+            }
+            TradingMode::Hybrid => {
+                warn!("Hybrid mode not yet implemented, falling back to arb");
+                StrategyRunner::Arb(
+                    strategy::arb::ArbitrageStrategy::new(config.min_profit_threshold),
+                )
+            }
+        };
+        strategy_runner.on_window_start();
+        info!("Strategy '{}' active for this window", strategy_runner.name());
 
         // Initialize order book monitor
         let mut monitor = OrderBookMonitor::new();
@@ -509,7 +570,7 @@ async fn main() -> Result<()> {
                         let position_tracker = risk_manager_wd.position_tracker();
                         let mut did_any_merge = false;
                         if let Some(proxy) = config_wd.proxy_address {
-                            match get_positions().await {
+                            match get_positions_for(proxy).await {
                                 Ok(positions) => {
                                     let condition_ids = condition_ids_with_both_sides(&positions);
                                     let merge_info = merge_info_with_both_sides(&positions);
@@ -551,22 +612,26 @@ async fn main() -> Result<()> {
 
                         // 3. Market sell remaining single leg positions
                         let wind_down_sell_price = Decimal::try_from(config_wd.wind_down_sell_price).unwrap_or(dec!(0.01));
-                        match get_positions().await {
-                            Ok(positions) => {
-                                for pos in positions.iter().filter(|p| p.size > dec!(0)) {
-                                    let size_floor = (pos.size * dec!(100)).floor() / dec!(100);
-                                    if size_floor < dec!(0.01) {
-                                        debug!(token_id = %pos.asset, size = %pos.size, "Wind down: position too small, skipping sell");
-                                        continue;
-                                    }
-                                    if let Err(e) = executor_wd.sell_at_price(pos.asset, wind_down_sell_price, size_floor).await {
-                                        warn!(token_id = %pos.asset, size = %pos.size, error = %e, "Wind down: failed to sell single leg");
-                                    } else {
-                                        info!("✅ Wind down: sell order placed | token_id={:#x} | amount:{} | price:{:.4}", pos.asset, size_floor, wind_down_sell_price);
+                        if let Some(sell_proxy) = config_wd.proxy_address {
+                            match get_positions_for(sell_proxy).await {
+                                Ok(positions) => {
+                                    for pos in positions.iter().filter(|p| p.size > dec!(0)) {
+                                        let size_floor = (pos.size * dec!(100)).floor() / dec!(100);
+                                        if size_floor < dec!(0.01) {
+                                            debug!(token_id = %pos.asset, size = %pos.size, "Wind down: position too small, skipping sell");
+                                            continue;
+                                        }
+                                        if let Err(e) = executor_wd.sell_at_price(pos.asset, wind_down_sell_price, size_floor).await {
+                                            warn!(token_id = %pos.asset, size = %pos.size, error = %e, "Wind down: failed to sell single leg");
+                                        } else {
+                                            info!("✅ Wind down: sell order placed | token_id={:#x} | amount:{} | price:{:.4}", pos.asset, size_floor, wind_down_sell_price);
+                                        }
                                     }
                                 }
+                                Err(e) => { warn!(error = %e, "Wind down: failed to get positions, skipping sell"); }
                             }
-                            Err(e) => { warn!(error = %e, "Wind down: failed to get positions, skipping sell"); }
+                        } else {
+                            warn!("Wind down: no proxy address configured, skipping sell");
                         }
 
                         info!("🛑 Wind down complete, continuing to monitor until window end");
@@ -662,203 +727,26 @@ async fn main() -> Result<()> {
                                     "Order book pair details"
                                 );
 
-                                // Detect arbitrage opportunities (monitoring phase: only execute when total price <= 1 - arbitrage execution spread)
-                                use rust_decimal::Decimal;
-                                let execution_threshold = dec!(1.0) - Decimal::try_from(config.arbitrage_execution_spread)
-                                    .unwrap_or(dec!(0.01));
-                                if let Some(total_price) = total_ask_price {
-                                    if total_price <= execution_threshold {
-                                        if let Some(opp) = _detector.check_arbitrage(
-                                            &pair.yes_book,
-                                            &pair.no_book,
-                                            &pair.market_id,
-                                        ) {
-                                            // Check if YES price meets threshold
-                                            if config.min_yes_price_threshold > 0.0 {
-                                                use rust_decimal::Decimal;
-                                                let min_yes_price_decimal = Decimal::try_from(config.min_yes_price_threshold)
-                                                    .unwrap_or(dec!(0.0));
-                                                if opp.yes_ask_price < min_yes_price_decimal {
-                                                    debug!(
-                                                        "⏸️ YES price below threshold, skipping arbitrage execution | market:{} | YES price:{:.4} | threshold:{:.4}",
-                                                        market_display,
-                                                        opp.yes_ask_price,
-                                                        config.min_yes_price_threshold
-                                                    );
-                                                    continue; // Skip this arbitrage opportunity
-                                                }
-                                            }
-                                            
-                                            // Check if NO price meets threshold
-                                            if config.min_no_price_threshold > 0.0 {
-                                                use rust_decimal::Decimal;
-                                                let min_no_price_decimal = Decimal::try_from(config.min_no_price_threshold)
-                                                    .unwrap_or(dec!(0.0));
-                                                if opp.no_ask_price < min_no_price_decimal {
-                                                    debug!(
-                                                        "⏸️ NO price below threshold, skipping arbitrage execution | market:{} | NO price:{:.4} | threshold:{:.4}",
-                                                        market_display,
-                                                        opp.no_ask_price,
-                                                        config.min_no_price_threshold
-                                                    );
-                                                    continue; // Skip this arbitrage opportunity
-                                                }
-                                            }
-                                            
-                                            // Check if approaching market end time (if stop time is configured)
-                                            // Use second-level precision, num_minutes() truncation in 5-minute market may cause missed detection
-                                            if config.stop_arbitrage_before_end_minutes > 0 {
-                                                if let Some(market_info) = market_map.get(&pair.market_id) {
-                                                    use chrono::Utc;
-                                                    let now = Utc::now();
-                                                    let time_until_end = market_info.end_date.signed_duration_since(now);
-                                                    let seconds_until_end = time_until_end.num_seconds();
-                                                    let threshold_seconds = config.stop_arbitrage_before_end_minutes as i64 * 60;
-                                                    
-                                                    if seconds_until_end <= threshold_seconds {
-                                                        debug!(
-                                                            "⏰ Approaching market end time, skipping arbitrage execution | market:{} | seconds until end:{} | stop threshold:{} minutes",
-                                                            market_display,
-                                                            seconds_until_end,
-                                                            config.stop_arbitrage_before_end_minutes
-                                                        );
-                                                        continue; // Skip this arbitrage opportunity
-                                                    }
-                                                }
-                                            }
-                                            
-                                            // Calculate order cost (USD)
-                                            // Use actual available size from arbitrage opportunity, but not exceeding configured max order size
-                                            use rust_decimal::Decimal;
-                                            let max_order_size = Decimal::try_from(config.max_order_size_usdc).unwrap_or(dec!(100.0));
-                                            let order_size = opp.yes_size.min(opp.no_size).min(max_order_size);
-                                            let yes_cost = opp.yes_ask_price * order_size;
-                                            let no_cost = opp.no_ask_price * order_size;
-                                            let total_cost = yes_cost + no_cost;
-                                            
-                                            // Check risk exposure limit
-                                            let position_tracker = _risk_manager.position_tracker();
-                                            let current_exposure = position_tracker.calculate_exposure();
-                                            
-                                            if position_tracker.would_exceed_limit(yes_cost, no_cost) {
-                                                warn!(
-                                                    "⚠️ Risk exposure limit exceeded, rejecting arbitrage trade | market:{} | current exposure:{:.2} USD | order cost:{:.2} USD | limit:{:.2} USD",
-                                                    market_display,
-                                                    current_exposure,
-                                                    total_cost,
-                                                    position_tracker.max_exposure()
-                                                );
-                                                continue; // Skip this arbitrage opportunity
-                                            }
-                                            
-                                            // Check position balance (using local cache, zero latency)
-                                            if position_balancer.should_skip_arbitrage(opp.yes_token_id, opp.no_token_id) {
-                                                warn!(
-                                                    "⚠️ Position severely unbalanced, skipping arbitrage execution | market:{}",
-                                                    market_display
-                                                );
-                                                continue; // Skip this arbitrage opportunity
-                                            }
-                                            
-                                            // Check trade interval: minimum 3 seconds between trades
-                                            {
-                                                let mut guard = last_trade_time.lock().await;
-                                                let now = Instant::now();
-                                                if let Some(last) = *guard {
-                                                    if now.saturating_duration_since(last) < MIN_TRADE_INTERVAL {
-                                                        let elapsed = now.saturating_duration_since(last).as_secs_f32();
-                                                        debug!(
-                                                            "⏱️ Trade interval less than 3 seconds, skipping | market:{} | since last:{}s",
-                                                            market_display,
-                                                            elapsed
-                                                        );
-                                                        continue; // Skip this arbitrage opportunity
-                                                    }
-                                                }
-                                                *guard = Some(now);
-                                            }
-
-                                            info!(
-                                                "⚡ Executing arbitrage trade | market:{} | profit:{:.2}% | order size:{} shares | order cost:{:.2} USD | current exposure:{:.2} USD",
-                                                market_display,
-                                                opp.profit_percentage,
-                                                order_size,
-                                                total_cost,
-                                                current_exposure
-                                            );
-                                            // Simplify exposure: increase exposure whenever arbitrage is executed, regardless of fill
-                                            position_tracker.update_exposure_cost(opp.yes_token_id, opp.yes_ask_price, order_size);
-                                            position_tracker.update_exposure_cost(opp.no_token_id, opp.no_ask_price, order_size);
-                                            
-                                            // Arbitrage execution: execute as long as total price <= threshold, do not skip based on price direction; direction only used for slippage allocation (down=second, up/flat=first)
-                                            // Clone needed variables to independent task (price direction used for slippage allocation by direction)
-                                            let executor_clone = executor.clone();
-                                            let risk_manager_clone = _risk_manager.clone();
-                                            let opp_clone = opp.clone();
-                                            let yes_dir_s = yes_dir.to_string();
-                                            let no_dir_s = no_dir.to_string();
-                                            
-                                            // Use tokio::spawn to execute arbitrage asynchronously, not blocking order book update processing
-                                            tokio::spawn(async move {
-                                                // Execute arbitrage trade (slippage: down=second, up/flat=first)
-                                                match executor_clone.execute_arbitrage_pair(&opp_clone, &yes_dir_s, &no_dir_s).await {
-                                                    Ok(result) => {
-                                                        // Save pair_id first because result will be moved
-                                                        let pair_id = result.pair_id.clone();
-                                                        
-                                                        // Register with risk manager (pass price info to calculate risk exposure)
-                                                        risk_manager_clone.register_order_pair(
-                                                            result,
-                                                            opp_clone.market_id,
-                                                            opp_clone.yes_token_id,
-                                                            opp_clone.no_token_id,
-                                                            opp_clone.yes_ask_price,
-                                                            opp_clone.no_ask_price,
-                                                        );
-
-                                                        // Handle risk recovery
-                                                        // Hedging strategy temporarily disabled, no action for single-sided fills
-                                                        match risk_manager_clone.handle_order_pair(&pair_id).await {
-                                                            Ok(action) => {
-                                                                // Hedging strategy disabled, no longer handling MonitorForExit and SellExcess
-                                                                match action {
-                                                                    crate::risk::recovery::RecoveryAction::None => {
-                                                                        // Normal case, no action needed
-                                                                    }
-                                                                    crate::risk::recovery::RecoveryAction::MonitorForExit { .. } => {
-                                                                        info!("Single-sided fill, but hedging strategy is disabled, no action");
-                                                                    }
-                                                                    crate::risk::recovery::RecoveryAction::SellExcess { .. } => {
-                                                                        info!("Partial fill imbalance, but hedging strategy is disabled, no action");
-                                                                    }
-                                                                    crate::risk::recovery::RecoveryAction::ManualIntervention { reason } => {
-                                                                        warn!("Manual intervention required: {}", reason);
-                                                                    }
-                                                                }
-                                                            }
-                                                            Err(e) => {
-                                                                error!("Risk handling failed: {}", e);
-                                                            }
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        // Error details already logged in executor, only log summary here
-                                                        let error_msg = e.to_string();
-                                                        // Extract simplified error message
-                                                        if error_msg.contains("arbitrage failed") {
-                                                            // Error message already formatted, use directly
-                                                            error!("{}", error_msg);
-                                                        } else {
-                                                            error!("Failed to execute arbitrage trade: {}", error_msg);
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    }
+                                // ── Strategy dispatch ──────────────────────────────────
+                                // Replaces the previous inline arb detection + execution.
+                                // Strategy returns Action values; ActionExecutor runs them.
+                                if !wind_down_done {
+                                    let market_info_ref = market_map.get(&pair.market_id).copied();
+                                    let ctx = StrategyContext {
+                                        config: &config,
+                                        market_info: market_info_ref,
+                                        market_display: &market_display,
+                                        position_tracker: &_risk_manager.position_tracker(),
+                                        position_balancer: &position_balancer,
+                                        window_end,
+                                        yes_dir,
+                                        no_dir,
+                                    };
+                                    let actions = strategy_runner.on_book_update(&pair, &ctx).await;
+                                    action_executor.execute(actions, &market_display).await;
                                 }
-                            }
-                        }
+                            } // if let Some(pair)
+                        } // Some(Ok(book))
                         Some(Err(e)) => {
                             error!(error = %e, "Order book update error");
                             // Stream error, recreate stream
@@ -909,5 +797,8 @@ async fn main() -> Result<()> {
         // monitor will be automatically dropped at loop end, no manual cleanup needed
         info!("Current window monitoring ended, refreshing markets for next round");
     }
-}
 
+    // Unreachable: the loop above runs forever
+    #[allow(unreachable_code)]
+    Ok(())
+}

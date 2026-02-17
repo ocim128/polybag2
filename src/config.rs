@@ -4,6 +4,8 @@ use std::env;
 
 use polymarket_client_sdk::types::Address;
 
+use crate::strategy::TradingMode;
+
 /// Parse arbitrage order type: GTC, GTD, FOK, FAK, case-insensitive, defaults to GTD for invalid or unknown values.
 fn parse_arbitrage_order_type(s: &str) -> OrderType {
     match s.trim().to_uppercase().as_str() {
@@ -66,6 +68,21 @@ pub struct Config {
     pub wind_down_before_window_end_minutes: u64,
     /// Limit order price for single-leg sell during wind down (aim for quick execution), default 0.01
     pub wind_down_sell_price: f64,
+    /// Trading mode: arb (default), mm (market maker), hybrid
+    pub trading_mode: TradingMode,
+    /// Dry-run mode: log actions without sending orders (safe for testing)
+    pub dry_run: bool,
+    // === Market Maker settings ===
+    /// MM: base half-spread per side (0.03 = 3¢)
+    pub mm_base_spread: f64,
+    /// MM: Avellaneda-Stoikov inventory risk-aversion γ
+    pub mm_inventory_gamma: f64,
+    /// MM: max shares to accumulate per side (YES or NO)
+    pub mm_max_position_per_side: f64,
+    /// MM: size of each individual quote (shares)
+    pub mm_quote_size: f64,
+    /// MM: stop quoting when fewer than N seconds remain in window
+    pub mm_min_seconds_to_quote: i64,
 }
 
 impl Config {
@@ -79,7 +96,7 @@ impl Config {
 
         Ok(Config {
             private_key: env::var("POLYMARKET_PRIVATE_KEY")
-                .expect("POLYMARKET_PRIVATE_KEY must be set"),
+                .unwrap_or_default(), // empty in multi-wallet mode; launcher overrides per-slot
             proxy_address,
             min_profit_threshold: env::var("MIN_PROFIT_THRESHOLD")
                 .unwrap_or_else(|_| "0.001".to_string())
@@ -166,6 +183,29 @@ impl Config {
                 .unwrap_or_else(|_| "0.01".to_string())
                 .parse()
                 .unwrap_or(0.01), // Default 0.01
+            trading_mode: TradingMode::parse(
+                &env::var("TRADING_MODE").unwrap_or_else(|_| "arb".to_string()),
+            ),
+            dry_run: env::var("DRY_RUN")
+                .unwrap_or_else(|_| "false".to_string())
+                .trim()
+                .eq_ignore_ascii_case("true"),
+            // MM settings
+            mm_base_spread: env::var("MM_BASE_SPREAD")
+                .unwrap_or_else(|_| "0.03".to_string())
+                .parse().unwrap_or(0.03),
+            mm_inventory_gamma: env::var("MM_INVENTORY_GAMMA")
+                .unwrap_or_else(|_| "0.03".to_string())
+                .parse().unwrap_or(0.03),
+            mm_max_position_per_side: env::var("MM_MAX_POSITION_PER_SIDE")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse().unwrap_or(5.0),
+            mm_quote_size: env::var("MM_QUOTE_SIZE")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse().unwrap_or(1.0),
+            mm_min_seconds_to_quote: env::var("MM_MIN_SECONDS_TO_QUOTE")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse().unwrap_or(30),
         })
     }
 }
