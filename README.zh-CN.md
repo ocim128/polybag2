@@ -51,7 +51,7 @@ cargo build --release && cargo run --release
 ## 环境要求
 
 - **Rust** 1.70+（2021 edition）
-- **许可证**：项目根目录下有效的 `license.key`（需向作者获取）
+- **许可证**：项目根目录下有效的 `license.key`
 - **配置**：项目根目录的 `.env` 文件（见 [配置说明](#配置说明)）
 
 ---
