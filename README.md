@@ -53,7 +53,7 @@ cargo build --release && cargo run --release
 ## Requirements
 
 - **Rust** 1.70+ (2021 edition)
-- **License**: Valid `license.key` in project root (obtained from the author)
+- **License**: Valid `license.key` in project root
 - **Environment**: `.env` in project root (see [Configuration](#configuration))
 
 ---
