@@ -72,6 +72,7 @@ pub fn interactive_pick(wallets: &[WalletProfile]) -> Result<Vec<Slot>> {
     println!("Available strategies:");
     println!("  1. arb  — Spread arbitrage (YES+NO < 1.0)");
     println!("  2. mm   — Adversarial Market Maker");
+    println!("  3. apex — The Apex Market Maker (Advanced)");
     println!();
 
     // Show available wallets
@@ -141,7 +142,7 @@ pub fn interactive_pick(wallets: &[WalletProfile]) -> Result<Vec<Slot>> {
 
 /// Build slots from env without interactive prompts.
 /// Strategy precedence per wallet:
-/// 1) WALLET_N_STRATEGY (arb/mm/hybrid)
+/// 1) WALLET_N_STRATEGY (arb/mm/hybrid/apex)
 /// 2) fallback to global TRADING_MODE
 pub fn build_slots_non_interactive(
     wallets: &[WalletProfile],
@@ -156,9 +157,10 @@ pub fn build_slots_non_interactive(
             Ok(raw) if !raw.trim().is_empty() => match raw.trim().to_lowercase().as_str() {
                 "arb" => TradingMode::Arb,
                 "mm" | "market_maker" | "marketmaker" => TradingMode::MarketMaker,
+                "apex" | "apex_mm" | "apex_market_maker" => TradingMode::ApexMarketMaker,
                 "hybrid" => TradingMode::Hybrid,
                 _ => anyhow::bail!(
-                    "{} has invalid value '{}'. Use one of: arb, mm, hybrid",
+                    "{} has invalid value '{}'. Use one of: arb, mm, apex, hybrid",
                     strategy_var,
                     raw
                 ),
@@ -230,11 +232,12 @@ fn prompt_number(prompt: &str, min: usize, max: usize) -> Result<usize> {
 
 pub fn prompt_strategy() -> Result<TradingMode> {
     loop {
-        let input = prompt_line("Strategy [arb/mm]")?;
+        let input = prompt_line("Strategy [arb/mm/apex]")?;
         match input.to_lowercase().as_str() {
             "arb" | "1" => return Ok(TradingMode::Arb),
             "mm" | "2" => return Ok(TradingMode::MarketMaker),
-            _ => println!("  Please enter 'arb' or 'mm'"),
+            "apex" | "3" => return Ok(TradingMode::ApexMarketMaker),
+            _ => println!("  Please enter 'arb', 'mm', or 'apex'"),
         }
     }
 }

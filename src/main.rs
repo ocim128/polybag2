@@ -583,6 +583,20 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
                 info!("🏪 Market Maker config: {:?}", mm_cfg);
                 StrategyRunner::MarketMaker(strategy::mm::MarketMakerStrategy::new(mm_cfg))
             }
+            TradingMode::ApexMarketMaker => {
+                use rust_decimal::Decimal;
+                let apex_cfg = strategy::apex::ApexConfig {
+                    base_spread: Decimal::try_from(config.apex_base_spread).unwrap_or(rust_decimal_macros::dec!(0.03)),
+                    inventory_gamma: Decimal::try_from(config.apex_inventory_gamma).unwrap_or(rust_decimal_macros::dec!(0.05)),
+                    max_position_per_side: Decimal::try_from(config.apex_max_position_per_side).unwrap_or(rust_decimal_macros::dec!(10)),
+                    quote_size: Decimal::try_from(config.apex_quote_size).unwrap_or(rust_decimal_macros::dec!(1)),
+                    min_seconds_to_quote: config.apex_min_seconds_to_quote,
+                    toxicity_quote_threshold: config.apex_toxicity_quote_threshold,
+                    toxicity_imbalance_threshold: Decimal::try_from(config.apex_toxicity_imbalance_threshold).unwrap_or(rust_decimal_macros::dec!(0.3)),
+                };
+                info!("💎 Apex Market Maker config: {:?}", apex_cfg);
+                StrategyRunner::ApexMarketMaker(strategy::apex::ApexMarketMakerStrategy::new(apex_cfg))
+            }
             TradingMode::Hybrid => {
                 warn!("Hybrid mode not yet implemented, falling back to arb");
                 StrategyRunner::Arb(

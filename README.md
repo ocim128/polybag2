@@ -36,6 +36,9 @@ cargo build --release && cargo run --release
 - **Market discovery**: Fetches “Up/Down” 5-minute markets (e.g. `btc-updown-5m-1770972300`) from Gamma API by symbol and 5-min UTC window.
 - **Order book monitoring**: Subscribes to CLOB order books, detects when `yes_ask + no_ask < 1` (arbitrage opportunity).
 - **Arbitrage execution**: Places YES and NO orders (GTC/GTD/FOK/FAK), with configurable slippage, size limits, and execution threshold.
+- **Market Maker strategies**: 
+  - `mm`: Standard adversarial market maker with Avellaneda-Stoikov skew.
+  - `apex`: Advanced "The Apex Market Maker" with 4-phase adaptive quoting, flow toxicity detection, and near-expiry resolution scalp.
 - **Risk management**: Tracks exposure, enforces `RISK_MAX_EXPOSURE_USDC`, and optionally monitors hedges.
 - **Merge task**: Periodically fetches positions, and for markets where you hold both YES and NO, runs `merge_max` to redeem.
 - **Improved UX**: New startup summary, interactive strategy wizard, and periodic heartbeat logs.
@@ -117,6 +120,14 @@ Create a `.env` file (copy from `.env.example`). Required and optional variables
 | `DRY_RUN` | No | If `false`, requires live trading confirmation (default `false`). |
 | `LIVE_CONFIRM_REQUIRED` | No | If `true`, requires typing LIVE before starting real trades. Set to `false` for unattended runs. |
 | `MULTI_WALLET_NON_INTERACTIVE` | No | If `true`, skip multi-wallet picker and auto-start slots from `WALLET_N_*` env vars. |
+| **APEX Settings** | | |
+| `APEX_BASE_SPREAD` | No | Base half-spread per side (default `0.03`). |
+| `APEX_INVENTORY_GAMMA` | No | Inventory risk aversion (default `0.05`). |
+| `APEX_MAX_POSITION_PER_SIDE` | No | Max shares per side (default `10`). |
+| `APEX_QUOTE_SIZE` | No | Shares per individual quote (default `1`). |
+| `APEX_MIN_SECONDS_TO_QUOTE` | No | Stop quoting N seconds before expiry (default `10`). |
+| `APEX_TOXICITY_QUOTE_THRESHOLD` | No | Quotes per 10s considered toxic (default `5`). |
+| `APEX_TOXICITY_IMBALANCE_THRESHOLD` | No | OB imbalance shift for toxicity (default `0.3`). |
 
 ## Build & Run
 
@@ -196,7 +207,15 @@ This bot interacts with real markets and real funds. Use at your own risk. Ensur
 Every time the bot starts, it prints a clear configuration block showing the active mode (single/multi), safety status (dry-run), symbols, and wallet count.
 
 ### Strategy Wizard
-To easily switch strategies without editing `.env`, set `STARTUP_WIZARD=true`. On startup, it will prompt you to pick `arb` or `mm`.
+To easily switch strategies without editing `.env`, set `STARTUP_WIZARD=true`. On startup, it will prompt you to pick `arb`, `mm`, or `apex`.
+
+### Apex Mode ("The Apex Market Maker")
+The `apex` strategy uses 4 time phases for optimal capture:
+1. **Early (0-60s)**: Wide quotes for high-uncertainty retail flow.
+2. **Adaptive (60-180s)**: Toxicity-aware quoting with imbalance monitoring.
+3. **Cleanup (180-240s)**: Inventory-biased quoting to reach neutral before resolution.
+4. **Resolution (240-300s)**: Aggressive flattening and probability-based scalping.
+   - *Safety Note*: Set `DRY_RUN=true` for your first run to observe phase transitions.
 
 ### Multi-wallet Unattended Mode
 For headless/systemd operation with multiple wallets, set `MULTI_WALLET_NON_INTERACTIVE=true` and provide `WALLET_N_STRATEGY` (or rely on global `TRADING_MODE` fallback). This skips interactive slot picking.

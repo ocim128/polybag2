@@ -6,6 +6,7 @@
 pub mod arb;
 pub mod action_executor;
 pub mod mm;
+pub mod apex;
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -67,12 +68,14 @@ pub enum TradingMode {
     Arb,
     MarketMaker,
     Hybrid,
+    ApexMarketMaker,
 }
 
 impl TradingMode {
     pub fn parse(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "mm" | "market_maker" | "marketmaker" => Self::MarketMaker,
+            "apex" | "apex_mm" | "apex_market_maker" => Self::ApexMarketMaker,
             "hybrid" => Self::Hybrid,
             _ => Self::Arb,
         }
@@ -85,6 +88,7 @@ impl std::fmt::Display for TradingMode {
             Self::Arb => write!(f, "arb"),
             Self::MarketMaker => write!(f, "mm"),
             Self::Hybrid => write!(f, "hybrid"),
+            Self::ApexMarketMaker => write!(f, "apex"),
         }
     }
 }
@@ -96,6 +100,7 @@ impl std::fmt::Display for TradingMode {
 pub enum StrategyRunner {
     Arb(arb::ArbitrageStrategy),
     MarketMaker(mm::MarketMakerStrategy),
+    ApexMarketMaker(apex::ApexMarketMakerStrategy),
 }
 
 impl StrategyRunner {
@@ -103,6 +108,7 @@ impl StrategyRunner {
         match self {
             Self::Arb(s) => s.name(),
             Self::MarketMaker(s) => s.name(),
+            Self::ApexMarketMaker(s) => s.name(),
         }
     }
 
@@ -110,6 +116,7 @@ impl StrategyRunner {
         match self {
             Self::Arb(s) => s.on_window_start(),
             Self::MarketMaker(s) => s.on_window_start(),
+            Self::ApexMarketMaker(s) => s.on_window_start(),
         }
     }
 
@@ -121,6 +128,7 @@ impl StrategyRunner {
         match self {
             Self::Arb(s) => s.on_book_update(pair, ctx).await,
             Self::MarketMaker(s) => s.on_book_update(pair, ctx).await,
+            Self::ApexMarketMaker(s) => s.on_book_update(pair, ctx).await,
         }
     }
 }

@@ -89,6 +89,22 @@ pub struct Config {
     pub live_confirm_required: bool,
     /// Multi-wallet non-interactive mode: skip picker and build slots from env
     pub multi_wallet_non_interactive: bool,
+
+    // === Apex Market Maker settings ===
+    /// Apex: base half-spread per side (0.03 = 3¢)
+    pub apex_base_spread: f64,
+    /// Apex: Avellaneda-Stoikov inventory risk-aversion γ
+    pub apex_inventory_gamma: f64,
+    /// Apex: max shares to accumulate per side (YES or NO)
+    pub apex_max_position_per_side: f64,
+    /// Apex: size of each individual quote (shares)
+    pub apex_quote_size: f64,
+    /// Apex: stop quoting when fewer than N seconds remain in window
+    pub apex_min_seconds_to_quote: i64,
+    /// Apex: toxicity threshold (quotes per 10s)
+    pub apex_toxicity_quote_threshold: u32,
+    /// Apex: toxicity imbalance threshold (0.3 = 30%)
+    pub apex_toxicity_imbalance_threshold: f64,
 }
 
 impl Config {
@@ -224,6 +240,29 @@ impl Config {
                 .unwrap_or_else(|_| "false".to_string())
                 .trim()
                 .eq_ignore_ascii_case("true"),
+
+            // Apex MM settings
+            apex_base_spread: env::var("APEX_BASE_SPREAD")
+                .unwrap_or_else(|_| "0.03".to_string())
+                .parse().unwrap_or(0.03),
+            apex_inventory_gamma: env::var("APEX_INVENTORY_GAMMA")
+                .unwrap_or_else(|_| "0.05".to_string())
+                .parse().unwrap_or(0.05),
+            apex_max_position_per_side: env::var("APEX_MAX_POSITION_PER_SIDE")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse().unwrap_or(10.0),
+            apex_quote_size: env::var("APEX_QUOTE_SIZE")
+                .unwrap_or_else(|_| "1".to_string())
+                .parse().unwrap_or(1.0),
+            apex_min_seconds_to_quote: env::var("APEX_MIN_SECONDS_TO_QUOTE")
+                .unwrap_or_else(|_| "10".to_string())
+                .parse().unwrap_or(10),
+            apex_toxicity_quote_threshold: env::var("APEX_TOXICITY_QUOTE_THRESHOLD")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse().unwrap_or(5),
+            apex_toxicity_imbalance_threshold: env::var("APEX_TOXICITY_IMBALANCE_THRESHOLD")
+                .unwrap_or_else(|_| "0.3".to_string())
+                .parse().unwrap_or(0.3),
         })
     }
 }
