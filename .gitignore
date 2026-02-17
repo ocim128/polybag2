@@ -1,0 +1,27 @@
+# Rust build artifacts
+/target/
+
+# Environment and local secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+license.key
+*.key
+*.pem
+
+# Logs and runtime output
+*.log
+nohup.out
+bot.log
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

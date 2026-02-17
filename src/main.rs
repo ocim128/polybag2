@@ -186,9 +186,6 @@ async fn main() -> Result<()> {
 
     tracing::info!("Polymarket 5-minute arbitrage bot starting");
 
-    // License validation: valid license.key required, bot cannot run without license
-    poly_5min_bot::trial::check_license()?;
-
     // Load configuration
     let config = Config::from_env()?;
     tracing::info!("Configuration loaded");
@@ -790,8 +787,8 @@ async fn main() -> Result<()> {
                                                 current_exposure
                                             );
                                             // Simplify exposure: increase exposure whenever arbitrage is executed, regardless of fill
-                                            _pt.update_exposure_cost(opp.yes_token_id, opp.yes_ask_price, order_size);
-                                            _pt.update_exposure_cost(opp.no_token_id, opp.no_ask_price, order_size);
+                                            position_tracker.update_exposure_cost(opp.yes_token_id, opp.yes_ask_price, order_size);
+                                            position_tracker.update_exposure_cost(opp.no_token_id, opp.no_ask_price, order_size);
                                             
                                             // Arbitrage execution: execute as long as total price <= threshold, do not skip based on price direction; direction only used for slippage allocation (down=second, up/flat=first)
                                             // Clone needed variables to independent task (price direction used for slippage allocation by direction)

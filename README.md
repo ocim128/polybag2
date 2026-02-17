@@ -21,7 +21,7 @@ Below are the actual trading results; I earned over 30 USDC in less than a day.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/rvenandowsley/Polymarket-crypto-5min-arbitrage-bot.git && cd Polymarket-crypto-5min-arbitrage-bot
 
-# 2. Place license.key in project root, copy and edit .env
+# 2. Copy and edit .env
 cp .env.example .env
 # Edit .env: set POLYMARKET_PRIVATE_KEY (required)
 
@@ -44,7 +44,6 @@ cargo build --release && cargo run --release
 ## Requirements
 
 - **Rust** 1.70+ (2021 edition)
-- **License**: Valid `license.key` in project root
 - **Environment**: `.env` in project root (see [Configuration](#configuration))
 
 ---
@@ -70,20 +69,14 @@ cd Polymarket-crypto-5min-arbitrage-bot
 
 Or download and extract the project archive.
 
-### 3. License setup
-
-Place the `license.key` file in the project root. The program will not run without a valid license.
-
-Optional: set `POLY_15MIN_BOT_LICENSE=/path/to/license.key` to use a custom path.
-
-### 4. Configure environment
+### 3. Configure environment
 
 ```bash
 cp .env.example .env
 # Edit .env and fill in required variables (see Configuration below)
 ```
 
-### 5. Build
+### 4. Build
 
 ```bash
 cargo build --release
@@ -118,9 +111,6 @@ Create a `.env` file (copy from `.env.example`). Required and optional variables
 | `MERGE_INTERVAL_MINUTES` | No | Merge interval in minutes; `0` = disabled (default `0`). |
 | `MIN_YES_PRICE_THRESHOLD` | No | Only arb when YES price ≥ this; `0` = no filter (default `0`). |
 | `MIN_NO_PRICE_THRESHOLD` | No | Only arb when NO price ≥ this; `0` = no filter (default `0`). |
-| `POLY_15MIN_BOT_LICENSE` | No | Custom license file path; default is `./license.key`. |
-
----
 
 ## Build & Run
 
@@ -191,3 +181,9 @@ src/
 ## Disclaimer
 
 This bot interacts with real markets and real funds. Use at your own risk. Ensure you understand the config, risk limits, and Polymarket’s terms before running.
+
+---
+
+## Production
+
+For production deployment and operations, see [`PRODUCTION.md`](PRODUCTION.md).

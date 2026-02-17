@@ -18,6 +18,7 @@
 //! ```
 
 use std::env;
+use std::net::IpAddr;
 
 use alloy::primitives::{keccak256, Address, B256, Bytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
@@ -29,6 +30,7 @@ use polymarket_client_sdk::ctf::types::{CollectionIdRequest, MergePositionsReque
 use polymarket_client_sdk::ctf::Client;
 use polymarket_client_sdk::types::address;
 use polymarket_client_sdk::{contract_config, POLYGON};
+use reqwest::Url;
 use std::str::FromStr as _;
 use tracing::{info, warn};
 
@@ -82,6 +84,16 @@ sol! {
 const RPC_URL_DEFAULT: &str = "https://polygon-rpc.com";
 const RELAYER_URL_DEFAULT: &str = "https://relayer-v2.polymarket.com";
 const USDC_POLYGON: Address = address!("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
+const MERGE_ALLOW_UNSAFE_ENDPOINTS_ENV: &str = "MERGE_ALLOW_UNSAFE_ENDPOINTS";
+const ALLOWED_RELAYER_HOSTS: &[&str] = &["relayer-v2.polymarket.com"];
+const ALLOWED_RPC_HOSTS: &[&str] = &[
+    "polygon-rpc.com",
+    "rpc.ankr.com",
+    "polygon.llamarpc.com",
+    "polygon.drpc.org",
+    "polygon-mainnet.g.alchemy.com",
+    "polygon-mainnet.infura.io",
+];
 
 const RELAYER_GET_RELAY_PAYLOAD: &str = "/relay-payload";
 const RELAYER_SUBMIT: &str = "/submit";
@@ -109,6 +121,106 @@ use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Clone, Copy)]
+enum EndpointKind {
+    Rpc,
+    Relayer,
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    env::var(name)
+        .map(|s| {
+            let v = s.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
+fn is_local_or_private_host(host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = h.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => {
+                v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_documentation()
+                    || v4.is_unspecified()
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+            }
+        };
+    }
+    false
+}
+
+fn endpoint_kind_name(kind: EndpointKind) -> &'static str {
+    match kind {
+        EndpointKind::Rpc => "RPC",
+        EndpointKind::Relayer => "Relayer",
+    }
+}
+
+fn endpoint_allowlist(kind: EndpointKind) -> &'static [&'static str] {
+    match kind {
+        EndpointKind::Rpc => ALLOWED_RPC_HOSTS,
+        EndpointKind::Relayer => ALLOWED_RELAYER_HOSTS,
+    }
+}
+
+fn validate_endpoint_url(raw: &str, kind: EndpointKind) -> Result<String> {
+    let trimmed = raw.trim();
+    let url = Url::parse(trimmed).map_err(|e| anyhow::anyhow!("Invalid {} URL '{}': {}", endpoint_kind_name(kind), trimmed, e))?;
+    if url.scheme() != "https" {
+        anyhow::bail!(
+            "{} URL must use https: {}",
+            endpoint_kind_name(kind),
+            trimmed
+        );
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("{} URL missing host: {}", endpoint_kind_name(kind), trimmed))?
+        .to_ascii_lowercase();
+    if is_local_or_private_host(&host) {
+        anyhow::bail!(
+            "{} URL points to local/private host '{}', blocked",
+            endpoint_kind_name(kind),
+            host
+        );
+    }
+
+    let allow_unsafe = env_flag_enabled(MERGE_ALLOW_UNSAFE_ENDPOINTS_ENV);
+    let in_allowlist = endpoint_allowlist(kind).iter().any(|h| host == *h);
+    if !allow_unsafe && !in_allowlist {
+        anyhow::bail!(
+            "{} host '{}' is not allowlisted. Set {}=1 to bypass this check.",
+            endpoint_kind_name(kind),
+            host,
+            MERGE_ALLOW_UNSAFE_ENDPOINTS_ENV
+        );
+    }
+
+    if allow_unsafe && !in_allowlist {
+        warn!(
+            "{} URL host '{}' is not allowlisted ({}=1 bypass active)",
+            endpoint_kind_name(kind),
+            host,
+            MERGE_ALLOW_UNSAFE_ENDPOINTS_ENV
+        );
+    }
+
+    Ok(url.to_string())
+}
 
 fn encode_merge_calldata(req: &MergePositionsRequest) -> Vec<u8> {
     let sel = &keccak256(b"mergePositions(address,bytes32,bytes32,uint256[],uint256)")[..4];
@@ -335,15 +447,15 @@ pub async fn merge_max(
     private_key: &str,
     rpc_url: Option<&str>,
 ) -> Result<String> {
-    let rpc = rpc_url.unwrap_or(RPC_URL_DEFAULT);
+    let rpc = validate_endpoint_url(rpc_url.unwrap_or(RPC_URL_DEFAULT), EndpointKind::Rpc)?;
     let chain = POLYGON;
     let signer = LocalSigner::from_str(private_key)?.with_chain_id(Some(chain));
     let wallet = signer.address();
 
-    let provider = ProviderBuilder::new().wallet(signer.clone()).connect(rpc).await?;
+    let provider = ProviderBuilder::new().wallet(signer.clone()).connect(&rpc).await?;
     let client = Client::new(provider.clone(), chain)?;
     let config = contract_config(chain, false).ok_or_else(|| anyhow::anyhow!("unsupported chain_id: {}", chain))?;
-    let prov_read = ProviderBuilder::new().connect(rpc).await?;
+    let prov_read = ProviderBuilder::new().connect(&rpc).await?;
     let erc1155 = IERC1155Balance::new(config.conditional_tokens, prov_read);
     let ctf = config.conditional_tokens;
 
@@ -386,7 +498,10 @@ pub async fn merge_max(
         let builder_key = env::var("POLY_BUILDER_API_KEY").ok();
         let builder_secret = env::var("POLY_BUILDER_SECRET").ok();
         let builder_passphrase = env::var("POLY_BUILDER_PASSPHRASE").ok();
-        let relayer_url = env::var("RELAYER_URL").unwrap_or_else(|_| RELAYER_URL_DEFAULT.to_string());
+        let relayer_url = validate_endpoint_url(
+            &env::var("RELAYER_URL").unwrap_or_else(|_| RELAYER_URL_DEFAULT.to_string()),
+            EndpointKind::Relayer,
+        )?;
         match (builder_key.as_deref(), builder_secret.as_deref(), builder_passphrase.as_deref()) {
             (Some(k), Some(s), Some(p)) => {
                 let out = relayer_execute_merge(&merge_calldata, ctf, proxy, &signer, k, s, p, &relayer_url).await?;
