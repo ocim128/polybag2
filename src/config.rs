@@ -83,6 +83,12 @@ pub struct Config {
     pub mm_quote_size: f64,
     /// MM: stop quoting when fewer than N seconds remain in window
     pub mm_min_seconds_to_quote: i64,
+    /// Startup wizard: show interactive picker for strategy in single-mode
+    pub startup_wizard: bool,
+    /// Live confirmation: if true, require typing LIVE before trading if DRY_RUN=false
+    pub live_confirm_required: bool,
+    /// Multi-wallet non-interactive mode: skip picker and build slots from env
+    pub multi_wallet_non_interactive: bool,
 }
 
 impl Config {
@@ -206,6 +212,18 @@ impl Config {
             mm_min_seconds_to_quote: env::var("MM_MIN_SECONDS_TO_QUOTE")
                 .unwrap_or_else(|_| "30".to_string())
                 .parse().unwrap_or(30),
+            startup_wizard: env::var("STARTUP_WIZARD")
+                .unwrap_or_else(|_| "false".to_string())
+                .trim()
+                .eq_ignore_ascii_case("true"),
+            live_confirm_required: env::var("LIVE_CONFIRM_REQUIRED")
+                .unwrap_or_else(|_| "true".to_string())
+                .trim()
+                .eq_ignore_ascii_case("true"),
+            multi_wallet_non_interactive: env::var("MULTI_WALLET_NON_INTERACTIVE")
+                .unwrap_or_else(|_| "false".to_string())
+                .trim()
+                .eq_ignore_ascii_case("true"),
         })
     }
 }

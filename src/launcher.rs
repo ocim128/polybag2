@@ -121,7 +121,7 @@ pub fn interactive_pick(wallets: &[WalletProfile]) -> Result<Vec<Slot>> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("  Configuration summary:");
     for slot in &slots {
-        println!("  Slot {} │ {} │ {} │ dry_run: {}",
+        println!("  Slot {} | strategy:{} | wallet:{} | dry_run:{}",
             slot.index,
             slot.strategy,
             slot.wallet.name,
@@ -134,6 +134,43 @@ pub fn interactive_pick(wallets: &[WalletProfile]) -> Result<Vec<Slot>> {
     let confirm = prompt_line("Start? (y/n)")?;
     if !confirm.trim().eq_ignore_ascii_case("y") {
         anyhow::bail!("Aborted by user");
+    }
+
+    Ok(slots)
+}
+
+/// Build slots from env without interactive prompts.
+/// Strategy precedence per wallet:
+/// 1) WALLET_N_STRATEGY (arb/mm/hybrid)
+/// 2) fallback to global TRADING_MODE
+pub fn build_slots_non_interactive(
+    wallets: &[WalletProfile],
+    default_strategy: TradingMode,
+) -> Result<Vec<Slot>> {
+    let mut slots = Vec::new();
+
+    for (i, wallet) in wallets.iter().enumerate() {
+        let idx = i + 1;
+        let strategy_var = format!("WALLET_{}_STRATEGY", idx);
+        let strategy = match std::env::var(&strategy_var) {
+            Ok(raw) if !raw.trim().is_empty() => match raw.trim().to_lowercase().as_str() {
+                "arb" => TradingMode::Arb,
+                "mm" | "market_maker" | "marketmaker" => TradingMode::MarketMaker,
+                "hybrid" => TradingMode::Hybrid,
+                _ => anyhow::bail!(
+                    "{} has invalid value '{}'. Use one of: arb, mm, hybrid",
+                    strategy_var,
+                    raw
+                ),
+            },
+            _ => default_strategy.clone(),
+        };
+
+        slots.push(Slot {
+            index: idx,
+            strategy,
+            wallet: wallet.clone(),
+        });
     }
 
     Ok(slots)
@@ -191,7 +228,7 @@ fn prompt_number(prompt: &str, min: usize, max: usize) -> Result<usize> {
     }
 }
 
-fn prompt_strategy() -> Result<TradingMode> {
+pub fn prompt_strategy() -> Result<TradingMode> {
     loop {
         let input = prompt_line("Strategy [arb/mm]")?;
         match input.to_lowercase().as_str() {

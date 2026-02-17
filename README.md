@@ -36,8 +36,10 @@ cargo build --release && cargo run --release
 - **Market discovery**: Fetches “Up/Down” 5-minute markets (e.g. `btc-updown-5m-1770972300`) from Gamma API by symbol and 5-min UTC window.
 - **Order book monitoring**: Subscribes to CLOB order books, detects when `yes_ask + no_ask < 1` (arbitrage opportunity).
 - **Arbitrage execution**: Places YES and NO orders (GTC/GTD/FOK/FAK), with configurable slippage, size limits, and execution threshold.
-- **Risk management**: Tracks exposure, enforces `RISK_MAX_EXPOSURE_USDC`, and optionally monitors hedges (hedge logic currently disabled).
-- **Merge task**: Periodically fetches positions, and for markets where you hold both YES and NO, runs `merge_max` to redeem (requires `POLYMARKET_PROXY_ADDRESS` and `MERGE_INTERVAL_MINUTES`).
+- **Risk management**: Tracks exposure, enforces `RISK_MAX_EXPOSURE_USDC`, and optionally monitors hedges.
+- **Merge task**: Periodically fetches positions, and for markets where you hold both YES and NO, runs `merge_max` to redeem.
+- **Improved UX**: New startup summary, interactive strategy wizard, and periodic heartbeat logs.
+- **Safety**: Required explicit confirmation (`Type LIVE`) before starting real trades if `DRY_RUN=false`.
 
 ---
 
@@ -111,6 +113,10 @@ Create a `.env` file (copy from `.env.example`). Required and optional variables
 | `MERGE_INTERVAL_MINUTES` | No | Merge interval in minutes; `0` = disabled (default `0`). |
 | `MIN_YES_PRICE_THRESHOLD` | No | Only arb when YES price ≥ this; `0` = no filter (default `0`). |
 | `MIN_NO_PRICE_THRESHOLD` | No | Only arb when NO price ≥ this; `0` = no filter (default `0`). |
+| `STARTUP_WIZARD` | No | If `true`, show interactive strategy picker on startup (single-wallet). |
+| `DRY_RUN` | No | If `false`, requires live trading confirmation (default `false`). |
+| `LIVE_CONFIRM_REQUIRED` | No | If `true`, requires typing LIVE before starting real trades. Set to `false` for unattended runs. |
+| `MULTI_WALLET_NON_INTERACTIVE` | No | If `true`, skip multi-wallet picker and auto-start slots from `WALLET_N_*` env vars. |
 
 ## Build & Run
 
@@ -181,6 +187,26 @@ src/
 ## Disclaimer
 
 This bot interacts with real markets and real funds. Use at your own risk. Ensure you understand the config, risk limits, and Polymarket’s terms before running.
+
+---
+
+## Runtime UX & Safety
+
+### Startup Summary
+Every time the bot starts, it prints a clear configuration block showing the active mode (single/multi), safety status (dry-run), symbols, and wallet count.
+
+### Strategy Wizard
+To easily switch strategies without editing `.env`, set `STARTUP_WIZARD=true`. On startup, it will prompt you to pick `arb` or `mm`.
+
+### Multi-wallet Unattended Mode
+For headless/systemd operation with multiple wallets, set `MULTI_WALLET_NON_INTERACTIVE=true` and provide `WALLET_N_STRATEGY` (or rely on global `TRADING_MODE` fallback). This skips interactive slot picking.
+
+### Heartbeat
+The bot prints a heartbeat every 30 seconds:
+`💓 HEARTBEAT | slot_name | strategy:mm | dry_run:false | exposure:$12.50`
+
+### Live Confirmation
+If `DRY_RUN=false` and `LIVE_CONFIRM_REQUIRED=true`, the bot will pause and ask you to type `LIVE` before proceeding. This prevents accidental real-money trades. For headless or automated runs (systemd), set `LIVE_CONFIRM_REQUIRED=false` in your `.env`.
 
 ---
 

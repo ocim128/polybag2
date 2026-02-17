@@ -8,7 +8,7 @@ mod trading;
 mod utils;
 
 use poly_5min_bot::merge;
-use poly_5min_bot::positions::{get_positions, get_positions_for, Position};
+use poly_5min_bot::positions::{get_positions_for, Position};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -18,7 +18,7 @@ use rust_decimal_macros::dec;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 use polymarket_client_sdk::types::{Address, B256, U256};
@@ -183,6 +183,59 @@ async fn run_merge_task(
     }
 }
 
+fn print_startup_summary(config: &Config, wallets: &[crate::launcher::WalletProfile]) {
+    println!();
+    println!("╔══════════════════════════════════════════════╗");
+    println!("║   🚀 Polymarket Bot Startup Summary          ║");
+    println!("╚══════════════════════════════════════════════╝");
+    println!("  Mode:             {}", if wallets.is_empty() { "Single-wallet" } else { "Multi-wallet" });
+    println!("  Dry Run:          {}", if config.dry_run { "ENABLED (Simulated)" } else { "DISABLED (Live Trading!)" });
+    println!("  Live Confirm:     {}", if config.live_confirm_required { "REQUIRED" } else { "BYPASSED (Automation Mode)" });
+    println!(
+        "  MW Auto Start:    {}",
+        if config.multi_wallet_non_interactive {
+            "ENABLED (from env)"
+        } else {
+            "DISABLED (interactive picker)"
+        }
+    );
+    println!("  Trading Mode(s):  {}", if wallets.is_empty() { config.trading_mode.to_string() } else { "Multi-strategy".to_string() });
+    println!("  Symbols:          {}", config.crypto_symbols.join(", "));
+    println!("  Wallets:          {}", if wallets.is_empty() { "1 (detected from .env)".to_string() } else { format!("{} detected", wallets.len()) });
+    
+    if !wallets.is_empty() {
+        println!("\nMulti-wallet details:");
+        for (i, w) in wallets.iter().enumerate() {
+            let proxy_short = w.proxy_address.map(|a| {
+                let s = format!("{:?}", a);
+                if s.len() > 10 { format!("{}...{}", &s[..6], &s[s.len()-4..]) } else { s }
+            }).unwrap_or_else(|| "none".to_string());
+            println!("  [{}] Wallet: {:<12} | Proxy: {}", i + 1, w.name, proxy_short);
+        }
+    }
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+}
+
+fn confirm_live_trading() -> Result<()> {
+    println!();
+    println!("⚠️  WARNING: LIVE TRADING ENABLED ⚠️");
+    println!("You are about to start trading with REAL FUNDS.");
+    print!("Type LIVE to continue: ");
+    use std::io::{self, Write};
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    if let Err(e) = io::stdin().read_line(&mut buf) {
+        return Err(anyhow::anyhow!("Live confirmation required but no interactive stdin is available: {}", e));
+    }
+    if buf.trim() == "LIVE" {
+        info!("Live trading confirmed. Proceeding...");
+        Ok(())
+    } else {
+        anyhow::bail!("Live trading not confirmed. Aborting.")
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logger
@@ -190,20 +243,62 @@ async fn main() -> Result<()> {
     tracing::info!("Polymarket 5-minute arbitrage bot starting");
 
     // Load configuration
-    let config = Config::from_env()?;
+    let mut config = Config::from_env()?;
     tracing::info!("Configuration loaded");
-    info!("Trading mode: {} | Dry run: {}", config.trading_mode, config.dry_run);
 
     // Check for multi-wallet mode
     let wallets = launcher::load_wallets();
+
+    // 1. Startup summary
+    print_startup_summary(&config, &wallets);
+
     if !wallets.is_empty() {
-        // Multi-wallet interactive mode
+        // Multi-wallet mode
         info!("Multi-wallet mode: {} wallets detected", wallets.len());
-        let slots = launcher::interactive_pick(&wallets)?;
+        let slots = if config.multi_wallet_non_interactive {
+            info!("Multi-wallet non-interactive mode enabled, building slots from env");
+            launcher::build_slots_non_interactive(&wallets, config.trading_mode.clone())?
+        } else {
+            launcher::interactive_pick(&wallets)?
+        };
+
+        // Summary run plan
+        println!("\n🚀 Final run plan:");
+        for slot in &slots {
+            println!("  Slot {} | strategy:{} | wallet:{} | dry_run:{}",
+                slot.index, slot.strategy, slot.wallet.name, config.dry_run);
+        }
+
+        // 3. Live safety check
+        if !config.dry_run {
+            if config.live_confirm_required {
+                confirm_live_trading()?;
+            } else {
+                warn!("LIVE confirmation bypassed by LIVE_CONFIRM_REQUIRED=false");
+            }
+        }
+
         launcher::run_slots(config, slots).await?;
     } else {
         // Single-mode (backward compatible)
         info!("Single-mode: using POLYMARKET_PRIVATE_KEY from .env");
+
+        // 2. Beginner wizard toggle
+        if config.startup_wizard {
+            info!("Enabling startup wizard for strategy selection...");
+            config.trading_mode = launcher::prompt_strategy()?;
+            info!("Strategy '{}' selected via wizard", config.trading_mode);
+        }
+
+        // 3. Live safety check
+        if !config.dry_run {
+            if config.live_confirm_required {
+                confirm_live_trading()?;
+            } else {
+                warn!("LIVE confirmation bypassed by LIVE_CONFIRM_REQUIRED=false");
+            }
+        }
+
         run_trading_loop(config, "main").await?;
     }
 
@@ -422,6 +517,23 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
     } else {
         info!("Scheduled Merge not enabled (MERGE_INTERVAL_MINUTES=0). To enable, set MERGE_INTERVAL_MINUTES to a positive number in .env, e.g., 5 or 15");
     }
+
+    // Heartbeat task: log status every 30 seconds
+    let hb_slot_name = slot_name.to_string();
+    let hb_strategy = config.trading_mode.to_string();
+    let hb_dry_run = config.dry_run;
+    let hb_position_tracker = _risk_manager.position_tracker().clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            let exposure = hb_position_tracker.calculate_exposure();
+            info!(
+                "💓 HEARTBEAT | {} | strategy:{} | dry_run:{} | exposure:${:.2}",
+                hb_slot_name, hb_strategy, hb_dry_run, exposure
+            );
+        }
+    });
 
     // Main loop enabled, start monitoring and trading
     #[allow(unreachable_code)]
