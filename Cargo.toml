@@ -15,7 +15,6 @@ hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
 rust_decimal = "1.39"
-rpc-check = "0.1"
 rust_decimal_macros = "1.39"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -120,6 +120,7 @@ Create a `.env` file (copy from `.env.example`). Required and optional variables
 | `DRY_RUN` | No | If `false`, requires live trading confirmation (default `false`). |
 | `LIVE_CONFIRM_REQUIRED` | No | If `true`, requires typing LIVE before starting real trades. Set to `false` for unattended runs. |
 | `MULTI_WALLET_NON_INTERACTIVE` | No | If `true`, skip multi-wallet picker and auto-start slots from `WALLET_N_*` env vars. |
+| `TRADE_LOG_FILE` | No | JSONL file for important execution events (default `logs/trade_events.jsonl`). |
 | **APEX Settings** | | |
 | `APEX_BASE_SPREAD` | No | Base half-spread per side (default `0.03`). |
 | `APEX_INVENTORY_GAMMA` | No | Inventory risk aversion (default `0.05`). |
@@ -221,8 +222,15 @@ The `apex` strategy uses 4 time phases for optimal capture:
 For headless/systemd operation with multiple wallets, set `MULTI_WALLET_NON_INTERACTIVE=true` and provide `WALLET_N_STRATEGY` (or rely on global `TRADING_MODE` fallback). This skips interactive slot picking.
 
 ### Heartbeat
-The bot prints a heartbeat every 30 seconds:
-`💓 HEARTBEAT | slot_name | strategy:mm | dry_run:false | exposure:$12.50`
+The bot prints a heartbeat every 30 seconds with account state:
+`HEARTBEAT | slot_name | strategy:mm | dry_run:false | exposure:$12.50 | positions:4 | value:$28.14 | uPnL:$0.42 | rPnL:$1.05 | totalPnL:$1.47`
+
+### Trade Journal
+Important execution events are appended to `TRADE_LOG_FILE` (JSON Lines), including:
+- `arb_pair_submitted` / `arb_pair_executed` / `arb_pair_failed`
+- `limit_buy_posted` / `limit_buy_failed`
+- `cancel_all_ok` / `cancel_all_failed`
+- `order_blocked_exposure`
 
 ### Live Confirmation
 If `DRY_RUN=false` and `LIVE_CONFIRM_REQUIRED=true`, the bot will pause and ask you to type `LIVE` before proceeding. This prevents accidental real-money trades. For headless or automated runs (systemd), set `LIVE_CONFIRM_REQUIRED=false` in your `.env`.
@@ -232,3 +240,5 @@ If `DRY_RUN=false` and `LIVE_CONFIRM_REQUIRED=true`, the bot will pause and ask 
 ## Production
 
 For production deployment and operations, see [`PRODUCTION.md`](PRODUCTION.md).
+
+

@@ -25,3 +25,6 @@ bot.log
 # OS files
 .DS_Store
 Thumbs.db
+
+# archieve
+.txt

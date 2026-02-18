@@ -2868,7 +2868,6 @@ dependencies = [
  "hmac",
  "polymarket-client-sdk",
  "reqwest 0.12.28",
- "rpc-check",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -3413,15 +3412,6 @@ checksum = "bb919243f34364b6bd2fc10ef797edbfa75f33c252e7998527479c6d6b47e1ec"
 dependencies = [
  "bytes",
  "rustc-hex",
-]
-
-[[package]]
-name = "rpc-check"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c810aa22edcfd63bef7b78280893f672f3c1e460c5edaa8d32d2810f376d4e9"
-dependencies = [
- "tokio",
 ]
 
 [[package]]

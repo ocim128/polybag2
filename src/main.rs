@@ -200,6 +200,7 @@ fn print_startup_summary(config: &Config, wallets: &[crate::launcher::WalletProf
         }
     );
     println!("  Trading Mode(s):  {}", if wallets.is_empty() { config.trading_mode.to_string() } else { "Multi-strategy".to_string() });
+    println!("  Sign Mode:        {}", config.clob_signature_mode.as_str());
     println!("  Symbols:          {}", config.crypto_symbols.join(", "));
     println!("  Wallets:          {}", if wallets.is_empty() { "1 (detected from .env)".to_string() } else { format!("{} detected", wallets.len()) });
     
@@ -332,16 +333,22 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
 
     // Initialize trading executor (requires authentication)
     info!("Initializing trading executor (requires API authentication)...");
+    let eoa_address = {
+        use alloy::signers::Signer as _;
+        _signer_test.address()
+    };
+    let resolved_sig = config.clob_signature_mode.resolve(Some(eoa_address), config.proxy_address);
     if let Some(ref proxy) = config.proxy_address {
-        info!(proxy_address = %proxy, "Using Proxy signature type (Email/Magic or Browser Wallet)");
+        info!(proxy_address = %proxy, signature_type = ?resolved_sig, configured_signature_mode = %config.clob_signature_mode.as_str(), "Using proxy-enabled signature mode");
     } else {
-        info!("Using EOA signature type (direct trading)");
+        info!(signature_type = ?resolved_sig, configured_signature_mode = %config.clob_signature_mode.as_str(), "Using direct signature mode");
     }
     info!("Note: If you see 'Could not create api key' warning, this is normal. SDK will first try to create a new API key, then fall back to derivation on failure. Authentication will still succeed.");
     let executor = match TradingExecutor::new(
         config.private_key.clone(),
         config.max_order_size_usdc,
         config.proxy_address,
+        config.clob_signature_mode,
         config.slippage,
         config.gtd_expiration_secs,
         config.arbitrage_order_type.clone(),
@@ -373,11 +380,17 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
     let mut auth_builder_risk = Client::new("https://clob.polymarket.com", clob_config)?
         .authentication_builder(&signer_for_risk);
     
-    // If proxy_address is provided, set funder and signature_type
+    // Keep risk client auth signature mode consistent with trading executor.
     if let Some(funder) = config.proxy_address {
-        auth_builder_risk = auth_builder_risk
-            .funder(funder)
-            .signature_type(SignatureType::Proxy);
+        if resolved_sig == SignatureType::Eoa {
+            warn!("Risk client resolved signature type is EOA while proxy is set; ignoring proxy funder.");
+        } else {
+            auth_builder_risk = auth_builder_risk
+                .funder(funder)
+                .signature_type(resolved_sig);
+        }
+    } else if resolved_sig != SignatureType::Eoa {
+        auth_builder_risk = auth_builder_risk.signature_type(resolved_sig);
     }
     
     let clob_client = match auth_builder_risk.authenticate().await {
@@ -427,16 +440,6 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
     }
 
     info!("[{}] ✅ All components initialized, authentication verified", slot_name);
-
-    // RPC health check components (endpoint probing, circuit breaker, metrics)
-    let rpc_cfg = rpc_check::CheckConfig::builder()
-        .timeout(Duration::from_secs(5))
-        .build();
-    let _rpc_checker = rpc_check::RpcChecker::new(rpc_cfg);
-    let _rpc_circuit = rpc_check::CircuitBreaker::new();
-    let _rpc_metrics = rpc_check::Metrics::new();
-    let _ = _rpc_checker.validate_endpoint("https://clob.polymarket.com");
-    let _ = _rpc_checker.validate_endpoint("https://gamma-api.polymarket.com");
 
     // Create position balancer
     let position_balancer = Arc::new(PositionBalancer::new(
@@ -494,6 +497,7 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
         _risk_manager.clone(),
         _risk_manager.position_tracker(),
         config.dry_run,
+        slot_name,
     );
 
     // Scheduled Merge: execute merge every N minutes based on positions, only for markets with both YES+NO positions
@@ -523,15 +527,57 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
     let hb_strategy = config.trading_mode.to_string();
     let hb_dry_run = config.dry_run;
     let hb_position_tracker = _risk_manager.position_tracker().clone();
+    let hb_proxy = config.proxy_address.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
             interval.tick().await;
             let exposure = hb_position_tracker.calculate_exposure();
-            info!(
-                "💓 HEARTBEAT | {} | strategy:{} | dry_run:{} | exposure:${:.2}",
-                hb_slot_name, hb_strategy, hb_dry_run, exposure
-            );
+            match hb_proxy {
+                Some(proxy) => match get_positions_for(proxy).await {
+                    Ok(positions) => {
+                        let active: Vec<_> = positions.into_iter().filter(|p| p.size > dec!(0)).collect();
+                        let pos_count = active.len();
+                        let total_size: Decimal = active.iter().map(|p| p.size).sum();
+                        let current_value: Decimal = active.iter().map(|p| p.current_value).sum();
+                        let unrealized_pnl: Decimal = active.iter().map(|p| p.cash_pnl).sum();
+                        let realized_pnl: Decimal = active.iter().map(|p| p.realized_pnl).sum();
+                        let total_pnl = unrealized_pnl + realized_pnl;
+                        info!(
+                            "💓 HEARTBEAT | {} | strategy:{} | dry_run:{} | exposure:${:.2} | positions:{} | size:{} | value:${:.2} | uPnL:${:.2} | rPnL:${:.2} | totalPnL:${:.2}",
+                            hb_slot_name,
+                            hb_strategy,
+                            hb_dry_run,
+                            exposure,
+                            pos_count,
+                            total_size,
+                            current_value,
+                            unrealized_pnl,
+                            realized_pnl,
+                            total_pnl
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "💓 HEARTBEAT | {} | strategy:{} | dry_run:{} | exposure:${:.2} | positions:unavailable",
+                            hb_slot_name,
+                            hb_strategy,
+                            hb_dry_run,
+                            exposure
+                        );
+                    }
+                },
+                None => {
+                    info!(
+                        "💓 HEARTBEAT | {} | strategy:{} | dry_run:{} | exposure:${:.2} | positions:unavailable(no proxy)",
+                        hb_slot_name,
+                        hb_strategy,
+                        hb_dry_run,
+                        exposure
+                    );
+                }
+            }
         }
     });
 
@@ -551,16 +597,6 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
         if markets.is_empty() {
             warn!("No markets found, skipping current window");
             continue;
-        }
-
-        // RPC endpoint health check (batch probe before main loop)
-        let _ep_validator = rpc_check::EndpointValidator::new();
-        let _ = _ep_validator.normalize("https://clob.polymarket.com");
-        let _status = _rpc_checker.perform_health_check_sync("https://clob.polymarket.com");
-        let _ = _rpc_circuit.status_allows_request(_status);
-        if !_rpc_circuit.is_open() {
-            _rpc_circuit.record_success();
-            _rpc_metrics.record_check(true);
         }
 
         // New cycle start: reset risk exposure to accumulate from 0 this cycle
@@ -817,6 +853,10 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
 
                                 // Price direction arrows only shown during arbitrage opportunities
                                 let is_arbitrage = prefix == "🚨Arbitrage opportunity";
+                                // In apex mode, suppress non-opportunity arb snapshot logs ("no arbitrage")
+                                // to reduce terminal noise. Do not skip strategy execution.
+                                let suppress_snapshot_log =
+                                    config.trading_mode == TradingMode::ApexMarketMaker && !is_arbitrage;
                                 let yes_info = yes_best_ask
                                     .map(|(p, s)| {
                                         if is_arbitrage && !yes_dir.is_empty() {
@@ -836,14 +876,16 @@ pub async fn run_trading_loop(config: Config, slot_name: &str) -> Result<()> {
                                     })
                                     .unwrap_or_else(|| "No:none".to_string());
 
-                                info!(
-                                    "{} {} | {} | {} | {}",
-                                    prefix,
-                                    market_display,
-                                    yes_info,
-                                    no_info,
-                                    spread_info
-                                );
+                                if !suppress_snapshot_log {
+                                    info!(
+                                        "{} {} | {} | {} | {}",
+                                        prefix,
+                                        market_display,
+                                        yes_info,
+                                        no_info,
+                                        spread_info
+                                    );
+                                }
                                 
                                 // Keep original structured log for debugging (optional)
                                 debug!(

@@ -12,6 +12,7 @@ use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::config::ClobSignatureMode;
 use crate::monitor::arbitrage::ArbitrageOpportunity;
 
 pub struct OrderPairResult {
@@ -35,29 +36,75 @@ pub struct TradingExecutor {
 }
 
 impl TradingExecutor {
+    /// Polymarket CLOB minimum tick size is 0.01.
+    fn normalize_tick_price(price: Decimal) -> Decimal {
+        let tick = dec!(0.01);
+        (((price / tick).floor()) * tick).max(tick).min(dec!(1.0))
+    }
+
     pub async fn new(
         private_key: String,
         max_order_size_usdc: f64,
         proxy_address: Option<Address>,
+        clob_signature_mode: ClobSignatureMode,
         slippage: [f64; 2],
         gtd_expiration_secs: u64,
         arbitrage_order_type: OrderType,
     ) -> Result<Self> {
+        let private_key = private_key.trim().to_string();
         // Verify private key format
         let signer = LocalSigner::from_str(&private_key)
             .map_err(|e| anyhow::anyhow!("Invalid private key format: {}. Please ensure the private key is a 64-character hex string (without 0x prefix)", e))?
             .with_chain_id(Some(POLYGON));
 
-        let config = Config::builder().use_server_time(false).build();
+        // Wallet derivation diagnostics — show expected proxy/safe addresses for this EOA
+        let eoa_addr = signer.address();
+        let derived_proxy = polymarket_client_sdk::derive_proxy_wallet(eoa_addr, POLYGON);
+        let derived_safe  = polymarket_client_sdk::derive_safe_wallet(eoa_addr, POLYGON);
+        info!(
+            "Wallet diagnostics | EOA:{} | derived_proxy:{} | derived_safe:{} | configured_proxy:{:?}",
+            eoa_addr,
+            derived_proxy.map_or("N/A".to_string(), |a| format!("{}", a)),
+            derived_safe.map_or("N/A".to_string(), |a| format!("{}", a)),
+            proxy_address,
+        );
+        if let Some(cfg_proxy) = proxy_address {
+            let proxy_match = derived_proxy.map_or(false, |d| d == cfg_proxy);
+            let safe_match  = derived_safe.map_or(false, |d| d == cfg_proxy);
+            if !proxy_match && !safe_match {
+                warn!(
+                    "⚠️  PROXY MISMATCH: configured proxy {} does NOT match \
+                     derived Proxy wallet ({}) or Safe wallet ({}) for EOA {}. \
+                     This WILL cause invalid-signature errors. \
+                     Ensure WALLET_N_KEY and WALLET_N_PROXY belong to the same account.",
+                    cfg_proxy,
+                    derived_proxy.map_or("N/A".to_string(), |a| format!("{}", a)),
+                    derived_safe.map_or("N/A".to_string(), |a| format!("{}", a)),
+                    eoa_addr,
+                );
+            }
+        }
+
+        // Use server time for signed requests to avoid local clock skew causing invalid signatures.
+        let config = Config::builder().use_server_time(true).build();
         let mut auth_builder = Client::new("https://clob.polymarket.com", config)
             .map_err(|e| anyhow::anyhow!("Creating CLOB client failed: {}", e))?
             .authentication_builder(&signer);
-        
-        // If proxy_address is provided, set funder and signature_type (following Python SDK pattern)
+
+        let resolved_sig = clob_signature_mode.resolve(Some(eoa_addr), proxy_address);
+        // If proxy_address is provided, set funder and non-EOA signature type.
+        // EOA + funder is invalid, so EOA ignores funder.
         if let Some(funder) = proxy_address {
-            auth_builder = auth_builder
-                .funder(funder)
-                .signature_type(SignatureType::Proxy);
+            if resolved_sig == SignatureType::Eoa {
+                warn!("CLOB signature type resolved to EOA while proxy address is set; ignoring proxy funder for authentication.");
+            } else {
+                auth_builder = auth_builder
+                    .funder(funder)
+                    .signature_type(resolved_sig);
+            }
+        } else if resolved_sig != SignatureType::Eoa {
+            // Allow explicit proxy/safe mode without funder; SDK may auto-derive funder.
+            auth_builder = auth_builder.signature_type(resolved_sig);
         }
         
         let client = auth_builder
@@ -69,6 +116,13 @@ impl TradingExecutor {
                     e
                 )
             })?;
+
+        info!(
+            "TradingExecutor authenticated | signature_type:{:?} | funder(proxy):{:?} | signer:{}",
+            resolved_sig,
+            proxy_address,
+            signer.address()
+        );
 
         Ok(Self {
             client,
@@ -107,6 +161,13 @@ impl TradingExecutor {
         price: Decimal,
         size: Decimal,
     ) -> Result<polymarket_client_sdk::clob::types::response::PostOrderResponse> {
+        let normalized_price = Self::normalize_tick_price(price);
+        if normalized_price != price {
+            warn!(
+                "Normalizing sell price to tick size | raw:{:.8} -> tick:{:.2}",
+                price, normalized_price
+            );
+        }
         let signer = LocalSigner::from_str(&self.private_key)?
             .with_chain_id(Some(POLYGON));
         let order = self
@@ -114,7 +175,7 @@ impl TradingExecutor {
             .limit_order()
             .token_id(token_id)
             .side(Side::Sell)
-            .price(price)
+            .price(normalized_price)
             .size(size)
             .order_type(OrderType::GTC)
             .build()
@@ -133,6 +194,13 @@ impl TradingExecutor {
         price: Decimal,
         size: Decimal,
     ) -> Result<polymarket_client_sdk::clob::types::response::PostOrderResponse> {
+        let normalized_price = Self::normalize_tick_price(price);
+        if normalized_price != price {
+            warn!(
+                "Normalizing buy price to tick size | raw:{:.8} -> tick:{:.2}",
+                price, normalized_price
+            );
+        }
         let signer = LocalSigner::from_str(&self.private_key)?
             .with_chain_id(Some(POLYGON));
         let order = self
@@ -140,7 +208,7 @@ impl TradingExecutor {
             .limit_order()
             .token_id(token_id)
             .side(Side::Buy)
-            .price(price)
+            .price(normalized_price)
             .size(size)
             .order_type(OrderType::GTC)
             .build()
@@ -203,8 +271,12 @@ impl TradingExecutor {
         // Slippage by direction: up=first, down/flat=second
         let yes_slippage_apply = self.slippage_for_direction(yes_dir);
         let no_slippage_apply = self.slippage_for_direction(no_dir);
-        let yes_price_with_slippage = (opp.yes_ask_price + yes_slippage_apply).min(dec!(1.0));
-        let no_price_with_slippage = (opp.no_ask_price + no_slippage_apply).min(dec!(1.0));
+        let yes_price_with_slippage = Self::normalize_tick_price(
+            (opp.yes_ask_price + yes_slippage_apply).min(dec!(1.0))
+        );
+        let no_price_with_slippage = Self::normalize_tick_price(
+            (opp.no_ask_price + no_slippage_apply).min(dec!(1.0))
+        );
         
         // Print price level info (prices with slippage applied)
         info!(

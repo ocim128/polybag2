@@ -1,0 +1,47 @@
+Both 5-min and 15-min Markets use Chainlink Data for resolution settlement
+
+2 out of 3 charts at 5-min markets open/close at the same price as 15-min one
+
+Is there any cross-market arbitrage?
+
+read more in thread:
+
+First market closes, Second continues, Third opens
+
+67% of 5-min markets are attached to 15-min markets:
+
+> price to beat matches with 1st 5-min market
+> resolution price matches with 3rd 5-min market
+> 2nd 50min market is not directly attached to 15-min market conditions.
+
+///
+
+Charts of both 5-min and 15-min markets are identical, no any difference
+
+Price data is supplied by Chainlink.
+
+Chainlink public terminal price has ~80 seconds delay from actual price. crucial with no doubts.
+
+Polymarket shows almost real actual prices (250-500ms)
+
+Only this is often enough to claim +EV from unexpected squeezes even with no use of bots.
+
+///
+
+5-min and 15-min markets are independent.
+
+There's a separate orderbook for each of them.
+
+Odds for YES/NO outcomes in majority are settled by different traders.
+
+In minority by existing arbitrage bots.
+
+They're similar to those who trade EITHER 15-min or 5-min markets
+
+BUT the strategy is originally different and much more complicated:
+
+Instead of Chainlink delay avoidance and 'fair' odds analysis, they trade delta-neutral cross-markets arbitrage.
+
+There're complicated triggers causing txn execution
+
+But what are they? I am asking devs right now.

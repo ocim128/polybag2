@@ -1,6 +1,7 @@
 use anyhow::Result;
-use polymarket_client_sdk::clob::types::OrderType;
+use polymarket_client_sdk::clob::types::{OrderType, SignatureType};
 use std::env;
+use std::io::ErrorKind;
 
 use polymarket_client_sdk::types::Address;
 
@@ -31,6 +32,89 @@ fn parse_slippage(s: &str) -> [f64; 2] {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClobSignatureMode {
+    Auto,
+    Eoa,
+    Proxy,
+    GnosisSafe,
+}
+
+impl ClobSignatureMode {
+    fn parse(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "eoa" => Self::Eoa,
+            "proxy" => Self::Proxy,
+            "gnosis_safe" | "gnosissafe" | "safe" => Self::GnosisSafe,
+            _ => Self::Auto,
+        }
+    }
+
+    /// Resolve the configured mode to a concrete [`SignatureType`].
+    ///
+    /// When `Auto`, we use CREATE2 derivation to detect whether the supplied
+    /// proxy address is a Polymarket Proxy wallet (Magic/email) or a Gnosis
+    /// Safe (browser wallet). If neither derivation matches we fall back to
+    /// `Proxy` which is correct for most Magic-link setups.
+    pub fn resolve(
+        self,
+        eoa_address: Option<Address>,
+        proxy_address: Option<Address>,
+    ) -> SignatureType {
+        match self {
+            Self::Auto => {
+                match (eoa_address, proxy_address) {
+                    (Some(eoa), Some(proxy)) => {
+                        // Try Proxy derivation first (Magic/email wallets)
+                        if let Some(derived) =
+                            polymarket_client_sdk::derive_proxy_wallet(eoa, polymarket_client_sdk::POLYGON)
+                        {
+                            if derived == proxy {
+                                return SignatureType::Proxy;
+                            }
+                        }
+                        // Try GnosisSafe derivation (browser wallets)
+                        if let Some(derived) =
+                            polymarket_client_sdk::derive_safe_wallet(eoa, polymarket_client_sdk::POLYGON)
+                        {
+                            if derived == proxy {
+                                return SignatureType::GnosisSafe;
+                            }
+                        }
+                        // Neither matched — user may have supplied a custom proxy.
+                        // Default to Proxy which is correct for Magic-link setups.
+                        tracing::warn!(
+                            "Auto signature detection: proxy address {} does not match \
+                             derived Proxy or Safe wallet for EOA {}. Defaulting to Proxy. \
+                             If you see invalid-signature errors set CLOB_SIGNATURE_TYPE \
+                             explicitly (proxy or gnosis_safe).",
+                            proxy, eoa,
+                        );
+                        SignatureType::Proxy
+                    }
+                    (_, Some(_)) => {
+                        // Proxy is set but we have no EOA to derive from — default Proxy
+                        SignatureType::Proxy
+                    }
+                    _ => SignatureType::Eoa,
+                }
+            }
+            Self::Eoa => SignatureType::Eoa,
+            Self::Proxy => SignatureType::Proxy,
+            Self::GnosisSafe => SignatureType::GnosisSafe,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Eoa => "eoa",
+            Self::Proxy => "proxy",
+            Self::GnosisSafe => "gnosis_safe",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub private_key: String,
@@ -49,6 +133,8 @@ pub struct Config {
     pub gtd_expiration_secs: u64, // GTD order expiry time (seconds), default 300 seconds (5 minutes); only effective when arbitrage_order_type=GTD
     /// Order type for arbitrage orders: GTC (Good Till Canceled), GTD (with gtd_expiration_secs), FOK (Fill or Kill), FAK (Fill and Kill)
     pub arbitrage_order_type: OrderType,
+    /// CLOB signature mode: auto | eoa | proxy | gnosis_safe
+    pub clob_signature_mode: ClobSignatureMode,
     pub stop_arbitrage_before_end_minutes: u64, // Stop arbitrage N minutes before market end, default 0 (don't stop)
     /// Scheduled merge interval (minutes), 0 means disabled. CONDITION_ID is obtained from current window markets like order book.
     pub merge_interval_minutes: u64,
@@ -109,7 +195,16 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        dotenvy::dotenv().ok();
+        match dotenvy::dotenv() {
+            Ok(_) => {}
+            Err(dotenvy::Error::Io(err)) if err.kind() == ErrorKind::NotFound => {}
+            Err(e) => {
+                anyhow::bail!(
+                    "Failed to parse .env: {}. Ensure every non-comment line is KEY=VALUE and notes start with '#'.",
+                    e
+                );
+            }
+        }
 
         // Parse proxy_address (optional)
         let proxy_address: Option<Address> = env::var("POLYMARKET_PROXY_ADDRESS")
@@ -164,6 +259,9 @@ impl Config {
                 .unwrap_or(300), // Default 300 seconds (5 minutes)
             arbitrage_order_type: parse_arbitrage_order_type(
                 &env::var("ARBITRAGE_ORDER_TYPE").unwrap_or_else(|_| "GTD".to_string()),
+            ),
+            clob_signature_mode: ClobSignatureMode::parse(
+                &env::var("CLOB_SIGNATURE_TYPE").unwrap_or_else(|_| "auto".to_string()),
             ),
             stop_arbitrage_before_end_minutes: env::var("STOP_ARBITRAGE_BEFORE_END_MINUTES")
                 .unwrap_or_else(|_| "0".to_string())
